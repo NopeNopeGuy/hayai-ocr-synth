@@ -22,4 +22,3 @@ wandb
 fire
 budou
 albumentations>=1.1
-html2image
