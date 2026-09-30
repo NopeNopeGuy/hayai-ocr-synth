@@ -42,7 +42,7 @@ class MangaOcr:
         else:
             raise ValueError(f"img_or_path must be a path or PIL.Image, instead got: {img_or_path}")
 
-        img = img.convert("L").convert("RGB")
+        img = img.convert("RGB")
 
         x = self._preprocess(img)
         x = self.model.generate(x[None].to(self.model.device), max_length=300)[0].cpu()

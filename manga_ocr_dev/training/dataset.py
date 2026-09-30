@@ -105,17 +105,22 @@ class MangaDataset(Dataset):
     @staticmethod
     def read_image(processor, path, transform=None):
         img = cv2.imread(str(path))
+        # cv2 loads BGR; the ViT processor expects RGB. For legacy grayscale
+        # synth (2D gray JPGs imread replicates to 3 identical channels) this
+        # is a no-op, but for coloured synth it preserves the hue.
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        if transform is None:
-            transform = A.ToGray(always_apply=True)
-
-        img = transform(image=img)["image"]
+        if transform is not None:
+            img = transform(image=img)["image"]
 
         pixel_values = processor.feature_extractor(img, return_tensors="pt").pixel_values
         return pixel_values.squeeze()
 
     @staticmethod
     def get_transforms():
+        # NOTE: no ToGray here. Grayscale content (real manga crops, black-ink
+        # synth) is already gray-in-RGB, so it trains identically to before,
+        # while coloured synth keeps its hue instead of being flattened.
         t_medium = A.Compose(
             [
                 A.Rotate(5, border_mode=cv2.BORDER_REPLICATE, p=0.2),
@@ -133,7 +138,6 @@ class MangaDataset(Dataset):
                 A.RandomBrightnessContrast(p=0.5),
                 A.GaussNoise((50, 200), p=0.3),
                 A.ImageCompression(1, 30, p=0.1),
-                A.ToGray(always_apply=True),
             ]
         )
 
@@ -154,7 +158,6 @@ class MangaDataset(Dataset):
                 A.RandomBrightnessContrast(0.8, 0.8, p=1),
                 A.GaussNoise((1000, 10000), p=0.3),
                 A.ImageCompression(1, 10, p=0.5),
-                A.ToGray(always_apply=True),
             ]
         )
 

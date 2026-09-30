@@ -22,6 +22,49 @@ Features:
     at 20–32°): italic-like skew applied to the composited text layer, so
     stroke outlines and shadows stay aligned. Force/tune with
     `override_css_params={"slant": degrees}`.
+  - coloured text (sampled for ~60% of dialogue images and ~70% of SFX):
+    red, hot pink, orange, yellow, green, lime, cyan, blue, purple, magenta,
+    brown and light pink, with pink weighted heavily. A good share of coloured
+    images mixes several colours within one image — `per_line` paints each
+    column/row its own colour (emphasis lettering), `per_char` paints every
+    glyph its own colour (rainbow SFX). Coloured samples are saved as colour
+    (3-channel BGR) images so the hue survives; black/white samples stay
+    grayscale. Legibility is computed programmatically (WCAG contrast):
+    light fills automatically get a black outline, dark fills a white one, so
+    even neon yellow/cyan stays readable on white bubbles. Force with
+    `override_css_params={"text_color": "pink"}` (hex works too),
+    `{"color_mode": "per_char", "text_colors": ["red", "yellow", "cyan"]}`,
+    and tune via `COLOR_PROB` / `SFX_COLOR_PROB` / `MULTICOLOR_PROB` /
+    `SFX_MULTICOLOR_PROB` in `renderer.py`.
+- SFX split (separate dataset, `run(..., split="sfx")` → `img_sfx/` +
+  `meta_sfx/` with `source=sfx`): short onomatopoeia (`ドン`, `ズキュン`,
+  `はぁ`, `ぐちゅ`…) rendered huge (90–150 px) with curved baselines
+  (`arc`/`wave`/`diagonal`/`straight`), true per-glyph perspective warps,
+  per-glyph size/tilt, thick white outlines with optional black-outer
+  double edges, radiating speedlines and jagged burst balloons behind the
+  text, plus optional whole-block rotation. No furigana, no dialogue
+  bubbles. Only font-rendered glyphs are labeled — `♡♥★` survive in the GT
+  only as characters in the string, never as decorative shapes. Force with
+  `generator.process(sfx=True)` / `override_css_params={"sfx": True}` and
+  tune via `sfx_curve`, `sfx_curve_amp`, `sfx_persp`, `sfx_rotate`,
+  `sfx_speedlines`, `sfx_burst`, `sfx_double_outline`, `sfx_block_rotate`.
+  Diversity/accuracy notes for the SFX split:
+  - ~200 base onomatopoeia (impact, breakage, motion, ambient, emotion, body
+    reactions, soft hiragana SFX) combined procedurally: stretched vowels
+    (`ドン` → `ドォン`), repeats/stutters (`ドドドン`), compounds, hiragana ↔
+    katakana script variants, elongation (`ー`, `〜`, `ッ`) and mark tails
+    (`!?`, `♡`, `...`). The ellipsis is spelled `...` in the GT, like dialogue.
+  - Every candidate is checked against the font's supported characters and is
+    rejected, never truncated, so the label always equals the drawn glyphs.
+  - Fonts: only fonts that cover the SFX kana are sampled (a font without kana
+    used to draw tofu boxes under a valid-looking label); `special`/`common`
+    fonts are weighted up.
+  - 7 baseline curves (`arc`, `wave`, `diagonal`, `straight`, `zigzag`,
+    `bounce`, `hill`), per-glyph stretch (`sfx_aspect`), letter spacing from
+    tight to airy, white ink with a black edge, and radial or parallel
+    (`sfx_speedline_style`) speedlines.
+  - Two-line vertical SFX are now laid out right-to-left, so line 1 of the GT
+    is the right-hand column (it used to be reversed).
 
 
 Text rendering is done directly with [Pillow](https://pillow.readthedocs.io/)
