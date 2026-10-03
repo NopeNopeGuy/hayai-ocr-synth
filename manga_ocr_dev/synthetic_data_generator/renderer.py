@@ -73,13 +73,14 @@ harder to parallelize than plain Pillow.
 """
 
 import math
+from collections import OrderedDict
 import re
 import threading
 
 import albumentations as A
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 from manga_ocr_dev.env import BACKGROUND_ANIMETEXT_DIR, BACKGROUND_DIR
 from manga_ocr_dev.synthetic_data_generator.utils import (
@@ -146,8 +147,14 @@ SFX_CURVE_AMP_RANGE = (0.15, 0.45)  # in em of the line font size
 SFX_SPEEDLINE_PROB = 0.6
 SFX_SPEEDLINE_N_RANGE = (24, 64)
 SFX_BURST_PROB = 0.35
-SFX_DOUBLE_OUTLINE_PROB = 0.6
+SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_VERTICAL_PROB = 0.4
+# Tight SFX crops: the crop box hugs the lettering (fill + stroke/outline),
+# never the decor (speedlines, burst balloon, shadow blur), which is simply
+# clipped by it. Margin around the ink as a fraction of the shorter side.
+SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
+SFX_CROP_MARGIN_MIN = 2  # px
+SFX_INK_ALPHA_THRESHOLD = 8  # ignore near-invisible anti-alias fringe
 
 # Coloured text defaults. Colour pages, covers and SFX use chromatic ink all
 # the time (red emphasis, hot pink, blue, orange, ...), so the majority of
@@ -178,6 +185,42 @@ TEXT_COLOR_NAMES = (
 )
 TEXT_COLOR_P = (0.20, 0.18, 0.08, 0.08, 0.07, 0.07, 0.04, 0.05, 0.09, 0.05, 0.05, 0.04)
 
+# Text border (outline) sampling. Outlines used to be applied to ~80% of
+# dialogue samples with sizes up to 8 px on 48 px type (a fat halo that makes
+# every glyph trivially separable from the art). Now most samples have no or a
+# hairline edge; fat edges are rare.
+STROKE_PROB = 0.40  # dialogue: fraction with an outline
+SHADOW_PROB = 0.08  # dialogue: fraction with a soft glow
+STROKE_SIZES = (1, 2, 3, 4, 6)
+STROKE_SIZE_P = (0.35, 0.30, 0.20, 0.10, 0.05)
+SFX_STROKE_FRAC = 0.05  # SFX outline cap, fraction of font size
+SFX_OUTER_RING = 2  # px added by the black outer ring of a double outline
+
+# Background difficulty. The old pipeline crushed contrast on every no-bubble
+# sample (contrast_limit=(-0.8,-0.3), p=1), blurred 30% of backgrounds, and
+# stretched mismatched-aspect crops with Resize, which blurs them further. The
+# result was flat, very dark or very light backgrounds. Now backgrounds keep
+# their texture and their mean brightness is pushed towards mid-tones or
+# towards the ink's own brightness (the hard case for an OCR model).
+BG_BLUR_PROB = 0.08
+BG_TONE_MODES = ("natural", "midtone", "ink_match")
+BG_TONE_P = (0.25, 0.35, 0.40)
+BG_MIN_STD = (22.0, 60.0)  # background texture std is lifted to at least this
+BG_INK_OFFSET = (60.0, 110.0)  # ink_match: |bg_mean - edge_lum| range
+# Hard legibility guarantee. Around the outermost ink pixels (the visible
+# glyph edge, outline included) at most BG_MAX_LOW_CONTRAST of the surrounding
+# background pixels may be within BG_MIN_EDGE_DIFF grey levels of the edge
+# colour. Anything worse is regenerated, so white-on-white can never ship.
+BG_MIN_EDGE_DIFF = 75.0
+BG_MAX_LOW_CONTRAST = 0.20
+BG_MAX_TRIES = 6
+BG_SCREENTONE_PROB = 0.25
+BG_GRADIENT_PROB = 0.25
+BG_NOISE_PROB = 0.35
+# Bubble fill variants: white used to be the only one.
+BUBBLE_FILL_MODES = ("white", "gray", "tint", "tone", "dark")
+BUBBLE_FILL_P = (0.45, 0.20, 0.10, 0.15, 0.10)
+
 RUBY_RE = re.compile(r"<ruby>(.*?)<rt>(.*?)</rt></ruby>")
 TCY_RE = re.compile(r'<span[^>]*?text-combine-upright[^>]*?>(.*?)</span>')
 TAG_RE = re.compile(r"<[^>]+>")
@@ -207,7 +250,11 @@ _NAMED_COLORS = {
     "brown": (150, 75, 0, 255),
 }
 
-_FONT_CACHE = {}
+# Bounded LRU. Every (font, size) pair is a separate FreeType face costing
+# several MB; SFX draws each glyph at its own size, so an unbounded dict grows
+# with (#fonts x #sizes) and eats all RAM (-> swap thrash that looks like a hang).
+_FONT_CACHE_MAX = 48
+_FONT_CACHE = OrderedDict()
 _FONT_CACHE_LOCK = threading.Lock()
 
 
@@ -415,7 +462,7 @@ def _ensure_legible_outline(params):
         params["stroke_color"] = "black"
     # SFX without its black outer edge would leave a light fill in a white
     # halo; the outer edge guarantees the silhouette on any background.
-    if params.get("sfx") and int(params.get("stroke_size", 0) or 0) >= 4:
+    if params.get("sfx") and int(params.get("stroke_size", 0) or 0) >= 5:
         params["sfx_double_outline"] = True
     return params
 
@@ -428,6 +475,10 @@ def _get_font(font_path, size):
         if font is None:
             font = ImageFont.truetype(str(font_path), int(size))
             _FONT_CACHE[key] = font
+            while len(_FONT_CACHE) > _FONT_CACHE_MAX:
+                _FONT_CACHE.popitem(last=False)  # evict least recently used
+        else:
+            _FONT_CACHE.move_to_end(key)
         return font
 
 
@@ -517,7 +568,7 @@ class Renderer:
         img, params = self.render_text(lines, override_css_params)
         # SFX sits directly on art: never draw a dialogue bubble around it.
         draw_bubble = None if not params.get("sfx") else False
-        img = self.render_background(img, draw_bubble=draw_bubble)
+        img = self.render_background(img, draw_bubble=draw_bubble, tight=bool(params.get("sfx")))
         # Native scan-like sizes: small crops stay small (never upscaled),
         # only oversized ones are shrunk to the ceiling. Any size and any
         # aspect ratio may come out, which is what variable-resolution
@@ -679,6 +730,7 @@ class Renderer:
 
         _assign_op_colors(ops, params)
 
+        outer_layer = None
         if sfx and bool(params.get("sfx_double_outline", False)) and stroke_size > 0:
             # Classic SFX edge: thick black outer + contrasting inner around the
             # (possibly coloured) fill. The outer ring stays black for every
@@ -689,7 +741,7 @@ class Renderer:
                 ops,
                 vertical=vertical,
                 fill=text_rgba,
-                stroke_width=stroke_size + 4,
+                stroke_width=stroke_size + SFX_OUTER_RING,
                 stroke_fill=(0, 0, 0, 255),
                 font_path=font_path,
                 font_size=font_size,
@@ -711,16 +763,36 @@ class Renderer:
         )
         base = Image.alpha_composite(base, main_layer)
 
+        # SFX: remember where the *lettering* is (fill + stroke + outer outline,
+        # no speedlines / burst / shadow) so the final crop can hug it.
+        ink = None
+        if sfx:
+            ink_alpha = main_layer.getchannel("A")
+            if outer_layer is not None:
+                ink_alpha = ImageChops.lighter(ink_alpha, outer_layer.getchannel("A"))
+            ink = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            ink.putalpha(ink_alpha)
+
         if sfx:
             block_rotate = float(params.get("sfx_block_rotate", 0.0))
             if block_rotate:
                 base = base.rotate(
                     block_rotate, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0)
                 )
+                ink = ink.rotate(block_rotate, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0))
 
         slant = float(params.get("slant", 0.0))
         if slant:
             base = _shear_layer(base, slant)
+            if ink is not None:
+                ink = _shear_layer(ink, slant)
+
+        if ink is not None:
+            # Clip everything (decor included) to the ink bounding box.
+            a = ink.getchannel("A").point(lambda v: 255 if v > SFX_INK_ALPHA_THRESHOLD else 0)
+            bbox = a.getbbox()
+            if bbox is not None:
+                base = base.crop(bbox)
 
         img = np.array(base)
         img = img[:, :, [2, 1, 0, 3]]  # RGBA -> BGRA (BGR channel order like cv2)
@@ -1524,7 +1596,7 @@ class Renderer:
             "irregular": False,
             # Cap the edge relative to the glyph size: a 10-14 px double outline on a
             # ~70 px thin hiragana fills its counters and the glyph turns into a blob.
-            "stroke_size": min(int(np.random.choice([4, 6, 8, 10])), max(3, round(0.07 * font_size))),
+            "stroke_size": min(int(np.random.choice([2, 3, 4, 5, 6])), max(2, round(SFX_STROKE_FRAC * font_size))),
             "stroke_color": "white",
             "sfx_curve": str(np.random.choice(SFX_CURVE_MODES, p=SFX_CURVE_P)),
             "sfx_aspect": float(np.random.uniform(0.0, SFX_ASPECT_MAX)) if np.random.rand() < 0.6 else 0.0,
@@ -1577,9 +1649,11 @@ class Renderer:
         if np.random.rand() < 0.7:
             params["text_orientation"] = "upright"
 
-        stroke_variant = np.random.choice(["stroke", "shadow", "none"], p=[0.8, 0.15, 0.05])
+        stroke_variant = np.random.choice(
+            ["stroke", "shadow", "none"], p=[STROKE_PROB, SHADOW_PROB, 1.0 - STROKE_PROB - SHADOW_PROB]
+        )
         if stroke_variant == "stroke":
-            params["stroke_size"] = np.random.choice([1, 2, 3, 4, 8])
+            params["stroke_size"] = int(np.random.choice(STROKE_SIZES, p=STROKE_SIZE_P))
             params["stroke_color"] = "white"
         elif stroke_variant == "shadow":
             # Small glow only: large blurs read as ghost/double characters.
@@ -1635,33 +1709,216 @@ class Renderer:
 
         return _ensure_legible_outline(params)
 
-    def render_background(self, img, draw_bubble=None):
-        """Add background and/or text bubble to a BGRA image, crop and return as BGR image."""
+    # ------------------------------------------------------------ backgrounds
+    def _load_background(self, h, w):
+        """Random background patch of size (h, w), BGR uint8.
+
+        Picks among the sources whose aspect ratio is closest to the target and
+        cuts a random window of exactly the target aspect, so nothing is
+        stretched (the old ``A.Resize`` squashed arbitrary-ratio crops, which
+        reads as blur) and the same source gives many different patches.
+        """
+        df = self.background_df
+        lr = getattr(self, "_bg_logratio", None)
+        if lr is None or len(lr) != len(df):
+            lr = np.log(df["w"].to_numpy(dtype=np.float64) / df["h"].to_numpy(dtype=np.float64))
+            self._bg_logratio = lr
+        d = np.abs(lr - np.log(w / h))
+        k = min(len(df), 64)
+        near = np.argpartition(d, k - 1)[:k]
+        bg = None
+        for _ in range(8):
+            row = df.iloc[int(np.random.choice(near))]
+            bg = cv2.imread(row.path)
+            if bg is not None:
+                break
+            near = np.arange(len(df))  # unreadable file: fall back to anything
+        if bg is None:
+            raise FileNotFoundError("no readable background image")
+
+        bh, bw = bg.shape[:2]
+        if bw / bh > w / h:
+            wh, ww = bh, bh * w / h
+        else:
+            ww, wh = bw, bw * h / w
+        # Random zoom into the source, but never so far that it must be
+        # upscaled much (upscaling is the other source of blur).
+        s_min = min(1.0, max(0.45, 0.6 * max(w / max(ww, 1), h / max(wh, 1))))
+        sc = np.random.uniform(s_min, 1.0)
+        ww, wh = max(8, int(ww * sc)), max(8, int(wh * sc))
+        ww, wh = min(ww, bw), min(wh, bh)
+        y0 = int(np.random.randint(0, bh - wh + 1))
+        x0 = int(np.random.randint(0, bw - ww + 1))
+        patch = bg[y0 : y0 + wh, x0 : x0 + ww]
+        if np.random.rand() < 0.5:
+            patch = patch[:, ::-1]
+        if np.random.rand() < 0.5:
+            patch = patch[::-1]
+        interp = cv2.INTER_AREA if ww * wh > w * h else cv2.INTER_LINEAR
+        patch = cv2.resize(np.ascontiguousarray(patch), (w, h), interpolation=interp)
+        if np.random.rand() < 0.5:
+            patch = 255 - patch
+        if np.random.rand() < BG_BLUR_PROB:
+            patch = cv2.GaussianBlur(patch, (3, 3), 0)
+        return patch
+
+    @staticmethod
+    def _ink_edge(img):
+        """(edge_lum, ring_mask) of a BGRA text image.
+
+        ``edge_lum`` is the mean grey level of the outermost opaque ink pixels
+        (what actually touches the background: the outline if there is one,
+        else the fill). ``ring_mask`` marks the background pixels just outside
+        the ink, where legibility is decided. ``edge_lum`` is None without ink.
+        """
+        solid = (img[:, :, 3] > 200).astype(np.uint8)
+        if not solid.any():
+            return None, None
+        k = np.ones((3, 3), np.uint8)
+        edge = (solid - cv2.erode(solid, k)).astype(bool)
+        if not edge.any():
+            edge = solid.astype(bool)
+        bgr = img[:, :, :3][edge].astype(np.float32)
+        lum = float((0.114 * bgr[:, 0] + 0.587 * bgr[:, 1] + 0.299 * bgr[:, 2]).mean())
+        ring = cv2.dilate(solid, np.ones((7, 7), np.uint8)).astype(bool) & ~solid.astype(bool)
+        return lum, ring
+
+    @staticmethod
+    def _low_contrast_frac(bg, edge_lum, ring):
+        """Fraction of ring pixels whose grey level is too close to the ink edge."""
+        if edge_lum is None or ring is None or not ring.any():
+            return 0.0
+        g = bg.astype(np.float32).mean(axis=2)[ring]
+        return float((np.abs(g - edge_lum) < BG_MIN_EDGE_DIFF).mean())
+
+    def _make_background(self, bg0, img):
+        """Tone + decorate ``bg0`` until the ink is legible against it."""
+        edge_lum, ring = self._ink_edge(img)
+        ink_lum = 0.0 if edge_lum is None else edge_lum
+        for _ in range(BG_MAX_TRIES):
+            bg = self._decorate_background(self._adjust_background(bg0, ink_lum))
+            if self._low_contrast_frac(bg, edge_lum, ring) <= BG_MAX_LOW_CONTRAST:
+                return bg
+        # Deterministic fallback: push the mean to the far side of the ink.
+        far = 70.0 if ink_lum >= 128 else 195.0
+        f = bg0.astype(np.float32)
+        f = (f - f.mean()) * 1.0 + far
+        bg = np.clip(f, 0, 255).astype(np.uint8)
+        if self._low_contrast_frac(bg, edge_lum, ring) > BG_MAX_LOW_CONTRAST:
+            bg = np.full_like(bg0, int(far))  # last resort: flat but legible
+        return bg
+
+    @staticmethod
+    def _adjust_background(bg, ink_lum):
+        """Make a background harder: keep texture, move its brightness off the extremes.
+
+        ``natural`` keeps the source brightness, ``midtone`` moves it to a mid
+        grey, ``ink_match`` moves it close to the ink's own brightness (dark
+        art behind black ink, light art behind white ink), which is the case an
+        OCR model finds hardest. Texture contrast is never reduced - it is
+        lifted to a minimum std - so the background stays busy rather than flat.
+        """
+        f = bg.astype(np.float32)
+        gray = f.mean(axis=2)
+        m, sd = float(gray.mean()), float(gray.std())
+        mode = str(np.random.choice(BG_TONE_MODES, p=BG_TONE_P))
+        if mode == "midtone":
+            target = np.random.uniform(85, 175)
+        elif mode == "ink_match":
+            off = np.random.uniform(*BG_INK_OFFSET) * np.random.choice([-1.0, 1.0])
+            target = float(np.clip(ink_lum + off, 35, 220))
+        else:
+            target = m
+        sd_t = max(sd, np.random.uniform(*BG_MIN_STD))
+        gain = float(np.clip(sd_t / max(sd, 1.0), 1.0, 3.0))
+        f = (f - m) * gain + target
+        return np.clip(f, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _decorate_background(bg):
+        """Optional screentone / gradient / sensor noise on a background."""
+        h, w = bg.shape[:2]
+        f = bg.astype(np.float32)
+        if np.random.rand() < BG_GRADIENT_PROB:
+            ang = np.random.uniform(0, 2 * np.pi)
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            g = (xx - w / 2) * np.cos(ang) + (yy - h / 2) * np.sin(ang)
+            g /= max(1.0, float(np.abs(g).max()))
+            f += (np.random.uniform(25, 70) * g)[..., None]
+        if np.random.rand() < BG_SCREENTONE_PROB:
+            dots = _screentone(h, w)
+            f *= (1.0 - np.random.uniform(0.2, 0.55) * dots)[..., None]
+        if np.random.rand() < BG_NOISE_PROB:
+            f += np.random.normal(0, np.random.uniform(3, 10), (h, w, 1)).astype(np.float32)
+        return np.clip(f, 0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _sample_bubble_fill():
+        """(mode, fill_bgr, contour_bgr). Bubbles used to be pure white only."""
+        mode = str(np.random.choice(BUBBLE_FILL_MODES, p=BUBBLE_FILL_P))
+        black, white = (0, 0, 0), (255, 255, 255)
+        if mode == "gray":
+            v = int(np.random.uniform(195, 243))
+            return mode, (v, v, v), black
+        if mode == "tint":
+            c = np.random.uniform(200, 255, 3)
+            c[int(np.argmax(c))] = 255
+            return mode, tuple(int(x) for x in c), black
+        if mode == "dark":
+            v = int(np.random.uniform(15, 70))
+            w = int(np.random.uniform(190, 255))
+            return mode, (v, v, v), (w, w, w)
+        return mode, white, black  # "white" and "tone" (tone gets a texture later)
+
+    def render_background(self, img, draw_bubble=None, tight=False):
+        """Add background and/or text bubble to a BGRA image, crop and return as BGR image.
+
+        ``tight=True`` (SFX) keeps only a thin margin around the ink and skips
+        the random loosening crop, so the result hugs the lettering.
+        """
         if draw_bubble is None:
             draw_bubble = np.random.random() < 0.7
 
-        m0 = int(min(img.shape[:2]) * 0.3)
+        if tight:
+            draw_bubble = False
+            side = min(img.shape[:2])
+            m0 = max(SFX_CROP_MARGIN_MIN, int(side * np.random.uniform(*SFX_CROP_MARGIN_FRAC)))
+        else:
+            m0 = int(min(img.shape[:2]) * 0.3)
         img = crop_by_alpha(img, m0)
 
-        background_path = self.background_df.sample(1).iloc[0].path
-        background = cv2.imread(background_path)
-
-        t = [
-            A.HorizontalFlip(),
-            A.RandomRotate90(),
-            A.InvertImg(),
-            A.RandomBrightnessContrast((-0.2, 0.4), (-0.8, -0.3), p=0.5 if draw_bubble else 1),
-            A.Blur((3, 5), p=0.3),
-            A.Resize(img.shape[0], img.shape[1]),
-        ]
-
-        background = A.Compose(t)(image=background)["image"]
-
-        if not draw_bubble:
-            if np.random.rand() < 0.5:
+        fill_mode, fill_bgr, contour_bgr = "white", (255, 255, 255), (0, 0, 0)
+        if draw_bubble:
+            edge_lum, _ = self._ink_edge(img)
+            edge_lum = 0.0 if edge_lum is None else edge_lum
+            # Resample the fill until the ink edge is clearly distinct from it
+            # (screentone fills are checked at their darkest shade). Light ink
+            # on a light gray bubble, or dark ink on a dark box, never ships.
+            for _ in range(BG_MAX_TRIES):
+                fill_mode, fill_bgr, contour_bgr = self._sample_bubble_fill()
+                ink = 255.0 - edge_lum if fill_mode == "dark" else edge_lum
+                fl = float(np.mean(fill_bgr))
+                lums = [fl, 255.0 * (1.0 - 0.45)] if fill_mode == "tone" else [fl]
+                if all(abs(ink - L) >= BG_MIN_EDGE_DIFF for L in lums):
+                    break
+            else:
+                fill_mode, fill_bgr, contour_bgr = ("white", (255, 255, 255), (0, 0, 0))
+                if edge_lum > 150:  # light ink: use a dark caption box instead
+                    fill_mode, fill_bgr, contour_bgr = ("dark", (30, 30, 30), (235, 235, 235))
+            if fill_mode == "dark":  # light lettering on a dark caption box
                 img[:, :, :3] = 255 - img[:, :, :3]
+        elif np.random.rand() < 0.5:
+            img[:, :, :3] = 255 - img[:, :, :3]
 
+        background = self._load_background(img.shape[0], img.shape[1])
+        if draw_bubble:
+            # The lettering sits on the bubble fill, not on this art, so the art
+            # only needs to be varied (the bubble contrast is set by the fill).
+            background = self._decorate_background(self._adjust_background(background, 128.0))
         else:
+            background = self._make_background(background, img)
+
+        if draw_bubble:
             radius = np.random.uniform(0.7, 1.0)
             thickness = np.random.choice([1, 2, 3])
             alpha = np.random.randint(60, 100)
@@ -1672,8 +1929,8 @@ class Renderer:
             xmin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
             xmax = img.shape[1] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
 
-            bubble_fill_color = (255, 255, 255, 255)
-            bubble_contour_color = (0, 0, 0, 255)
+            bubble_fill_color = (*fill_bgr, 255)
+            bubble_contour_color = (*contour_bgr, 255)
             bubble = np.zeros((img.shape[0], img.shape[1], 4), dtype=np.uint8)
             bubble = rounded_rectangle(
                 bubble,
@@ -1697,9 +1954,19 @@ class Renderer:
             ]
             bubble = A.Compose(t)(image=bubble)["image"]
 
+            if fill_mode == "tone":
+                # Screentone-filled bubble (dotted/shaded interior). The black
+                # contour stays black because it is multiplied by a value in (0, 1].
+                dots = _screentone(bubble.shape[0], bubble.shape[1])
+                shade = 1.0 - np.random.uniform(0.15, 0.45) * dots
+                bubble[:, :, :3] = (bubble[:, :, :3].astype(np.float32) * shade[..., None]).astype(np.uint8)
+
             background = blend(bubble, background)
 
         img = blend(img, background)
+
+        if tight:
+            return img
 
         ymin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
         ymax = img.shape[0] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
@@ -2026,6 +2293,17 @@ class BrowserRenderer(Renderer):
         img = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
         os.remove(filename)
         return img, params
+
+
+def _screentone(h, w):
+    """Halftone dot pattern in 0..1 (1 = dot), random pitch and angle."""
+    period = np.random.uniform(3.0, 8.0)
+    ang = np.random.uniform(0, np.pi)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    u = (xx * np.cos(ang) + yy * np.sin(ang)) * (2 * np.pi / period)
+    v = (-xx * np.sin(ang) + yy * np.cos(ang)) * (2 * np.pi / period)
+    pat = 0.5 * (np.cos(u) + np.cos(v))  # -1..1, peaks at dot centres
+    return np.clip((pat - np.random.uniform(0.0, 0.6)) * 4.0, 0.0, 1.0)
 
 
 def crop_by_alpha(img, margin):

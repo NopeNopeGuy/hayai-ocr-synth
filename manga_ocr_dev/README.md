@@ -89,10 +89,25 @@ Data generation pipeline assumes following directory structure:
 To use a language corpus for data generation, `lines/*.csv` files must be provided.
 For a small example of such file see `assets/lines_example.csv`.
 
+You can generate line packages using `manga_ocr_dev/data/process_text.py` or `manga_ocr_dev/data/process_dialogue.py` from:
+- [Japanese Dialogue Dataset](https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset) (splits: `anime_tv`, `anime_movie`, `drama_tv`, `drama_movie`, `unsorted`)
+- [Japanese Novels 23M](https://huggingface.co/datasets/OmniAICreator/Japanese-Novels-23M) (configs: `Narou_NSFW`, `Kakuyomu`, `Narou_SFW`, `Hameln`, `aozorabunko`, `novecomi`, `pixiv`)
+
+```bash
+# Mixed dialogue + novels (default, streams from HuggingFace on the fly)
+python manga_ocr_dev/data/process_text.py --num_packages=10 --num_lines_in_each_package=100000
+
+# Dialogue-only (subtitles from anime/drama)
+python manga_ocr_dev/data/process_dialogue.py --num_packages=10
+
+# Novels-only (including Narou_NSFW)
+python manga_ocr_dev/data/process_text.py --source_type=novel --num_packages=10
+```
+
 To generate synthetic data:
 1. Generate backgrounds with `data/generate_backgrounds.py`.
 2. Put your fonts in `<FONTS_ROOT>`.
 3. Generate fonts metadata with `synthetic_data_generator/scan_fonts.py`.
 4. Optionally manually label your fonts with `common/regular/special` labels.
-5. Provide `<DATA_SYNTHETIC_ROOT>/lines/*.csv`.
+5. Provide `<DATA_SYNTHETIC_ROOT>/lines/*.csv` with `process_text.py`.
 6. Run `synthetic_data_generator/run_generate.py` for each package.

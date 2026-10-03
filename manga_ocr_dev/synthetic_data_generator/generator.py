@@ -10,9 +10,10 @@ from manga_ocr_dev.synthetic_data_generator.utils import (
     get_font_meta,
     get_charsets,
     is_ascii,
+    is_hangul,
     is_hiragana,
-    is_katakana,
     is_kanji,
+    is_katakana,
     is_drawable,
     MissingGlyphError,
 )
@@ -166,7 +167,7 @@ class SyntheticDataGenerator:
             if "font_path" not in override_css_params:
                 override_css_params["font_path"] = self.get_random_font()
             vocab = self.font_map[override_css_params["font_path"]]
-            words = self.get_random_words(vocab)
+            words = self.get_random_words(vocab, override_css_params["font_path"])
         else:
             text = text.replace("\u3000", " ")
             text = text.replace("\u2026", "...")
@@ -202,15 +203,14 @@ class SyntheticDataGenerator:
         lettering in manga).
         """
         need = set("".join(SFX_BASES)) | set("ッーっ")
-        cover = {}
-        for path, chars in self.font_map.items():
-            cover[path] = len(need & chars) / len(need)
-        if not cover:
+        if not len(self.font_map):
             raise RuntimeError("font_map is empty: run scan_fonts.py first")
-        good = [p for p, c in cover.items() if c >= 0.98]
+        cover = self.font_map.coverage(need)
+        paths = self.font_map.paths
+        good = [paths[i] for i in np.flatnonzero(cover >= 0.98)]
         if not good:  # degrade gracefully: best available coverage
-            best = max(cover.values(), default=0.0)
-            good = [p for p, c in cover.items() if c >= best - 1e-9]
+            best = cover.max()
+            good = [paths[i] for i in np.flatnonzero(cover >= best - 1e-9)]
         weight_by_label = {"special": 3.0, "common": 2.0, "regular": 1.0}
         label_of = dict(zip(self.fonts_df.font_path, self.fonts_df.label))
         w = np.array([weight_by_label.get(label_of.get(p, "regular"), 1.0) for p in good], dtype=float)
@@ -322,7 +322,7 @@ class SyntheticDataGenerator:
         """Per-font character pools by class (cached; classification is slow)."""
         pools = self._pool_cache.get(vocab_key)
         if pools is None:
-            pools = {"hira": [], "kata": [], "kanji": [], "digit": [], "latin": [], "punct": [], "other": []}
+            pools = {"hira": [], "kata": [], "kanji": [], "hangul": [], "digit": [], "latin": [], "punct": [], "other": []}
             for c in vocab:
                 if c.isspace():
                     continue
@@ -332,6 +332,8 @@ class SyntheticDataGenerator:
                     pools["kata"].append(c)
                 elif is_kanji(c):
                     pools["kanji"].append(c)
+                elif is_hangul(c):
+                    pools["hangul"].append(c)
                 elif c.isdigit() and is_ascii(c):
                     pools["digit"].append(c)
                 elif is_ascii(c) and c.isalpha():
@@ -342,9 +344,11 @@ class SyntheticDataGenerator:
                 w = np.array([_kana_weight(c) for c in pools[key]], dtype=float)
                 pools[key + "_p"] = w / w.sum() if w.size else None
             self._pool_cache[vocab_key] = pools
+            while len(self._pool_cache) > 32:  # bounded: ~20k fonts would otherwise pile up
+                self._pool_cache.pop(next(iter(self._pool_cache)))
         return pools
 
-    def get_random_words(self, vocab):
+    def get_random_words(self, vocab, font_path=None):
         """Random text shaped like real Japanese instead of uniform noise.
 
         Words follow simple patterns (kana runs, kanji + okurigana, katakana
@@ -352,7 +356,7 @@ class SyntheticDataGenerator:
         manga dialogue, so the model sees kana-dominated text with kanji
         clusters and sentence punctuation rather than rare kanji everywhere.
         """
-        pools = self._pools(id(vocab), vocab)
+        pools = self._pools(font_path if font_path is not None else id(vocab), vocab)
         if len(pools["hira"]) < 10 or len(pools["kanji"]) < 10:
             # Symbol-poor / kana-less fonts: fall back to plain uniform sampling.
             vocab_list = [c for c in vocab if not c.isspace()] or ["あ"]
@@ -367,8 +371,8 @@ class SyntheticDataGenerator:
 
         max_text_len = np.random.choice(self.len_to_p.len, p=self.len_to_p.p)
         words, text_len = [], 0
-        kinds = ["kana", "kanji", "kata", "punct", "num"]
-        kp = np.array([0.42, 0.30, 0.10, 0.12, 0.06])
+        kinds = ["kana", "kanji", "kata", "punct", "num", "hangul"]
+        kp = np.array([0.40, 0.28, 0.10, 0.12, 0.05, 0.05])
         while True:
             kind = np.random.choice(kinds, p=kp / kp.sum())
             if kind == "kana":
@@ -381,6 +385,8 @@ class SyntheticDataGenerator:
                 word = pick(pools["kata"], 2, 5, pools["kata_p"])
                 if "ー" in vocab and np.random.rand() < 0.3:
                     word += "ー"
+            elif kind == "hangul" and pools["hangul"]:
+                word = pick(pools["hangul"], 1, 3)
             elif kind == "punct" and punct:
                 chars, w = zip(*punct)
                 w = np.array(w) / sum(w)
@@ -517,20 +523,22 @@ class SyntheticDataGenerator:
 
     def get_random_font(self, text=None):
         label = np.random.choice(self.font_labels, p=self.font_p)
-        df = self.fonts_df[self.fonts_df.label == label]
+        is_label = (self.fonts_df.label == label).to_numpy()
 
         if text is None:
-            return str(df.sample(1).iloc[0].font_path)
+            return str(self.fonts_df[is_label].sample(1).iloc[0].font_path)
 
-        valid_mask = df.font_path.apply(lambda x: self.is_font_supporting_text(x, text))
-        if not valid_mask.any():
+        # One vectorised pass over all fonts (bitmap lookup), no per-font Python.
+        supports = self.font_map.support_mask(text)
+        valid = is_label & supports
+        if not valid.any():
             # try every label before giving up on full support
-            valid_all = self.fonts_df.font_path.apply(lambda x: self.is_font_supporting_text(x, text))
-            if valid_all.any():
-                return str(self.fonts_df[valid_all].sample(1).iloc[0].font_path)
+            if supports.any():
+                return str(self.fonts_df[supports].sample(1).iloc[0].font_path)
             # text contains characters not supported by any font: pick one of the more capable fonts
-            valid_mask = df.num_chars >= 4000
-            if not valid_mask.any():
-                valid_mask = df.num_chars >= df.num_chars.max()
+            n = self.fonts_df.num_chars.to_numpy()
+            valid = is_label & (n >= 4000)
+            if not valid.any():
+                valid = is_label & (n >= n[is_label].max())
 
-        return str(df[valid_mask].sample(1).iloc[0].font_path)
+        return str(self.fonts_df[valid].sample(1).iloc[0].font_path)

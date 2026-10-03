@@ -7,44 +7,51 @@ from tqdm import tqdm
 
 from manga_ocr_dev.env import MANGA109_ROOT, BACKGROUND_DIR
 
-
 def find_rectangle(mask, y, x, aspect_ratio_range=(0.33, 3.0)):
-    ymin_ = ymax_ = y
-    xmin_ = xmax_ = x
+    h_max, w_max = mask.shape[:2]
+    ymin = y
+    ymax = y + 1
+    xmin = x
+    xmax = x + 1
 
-    ymin = ymax = xmin = xmax = None
+    can_up = True
+    can_down = True
+    can_left = True
+    can_right = True
 
-    while True:
-        if ymin is None:
-            ymin_ -= 1
-            if ymin_ == 0 or mask[ymin_, xmin_:xmax_].any():
-                ymin = ymin_
+    while can_up or can_down or can_left or can_right:
+        if can_up:
+            if ymin > 0 and not mask[ymin - 1, xmin:xmax].any():
+                ymin -= 1
+            else:
+                can_up = False
 
-        if ymax is None:
-            ymax_ += 1
-            if ymax_ == mask.shape[0] - 1 or mask[ymax_, xmin_:xmax_].any():
-                ymax = ymax_
+        if can_down:
+            if ymax < h_max and not mask[ymax, xmin:xmax].any():
+                ymax += 1
+            else:
+                can_down = False
 
-        if xmin is None:
-            xmin_ -= 1
-            if xmin_ == 0 or mask[ymin_:ymax_, xmin_].any():
-                xmin = xmin_
+        if can_left:
+            if xmin > 0 and not mask[ymin:ymax, xmin - 1].any():
+                xmin -= 1
+            else:
+                can_left = False
 
-        if xmax is None:
-            xmax_ += 1
-            if xmax_ == mask.shape[1] - 1 or mask[ymin_:ymax_, xmax_].any():
-                xmax = xmax_
+        if can_right:
+            if xmax < w_max and not mask[ymin:ymax, xmax].any():
+                xmax += 1
+            else:
+                can_right = False
 
-        h = ymax_ - ymin_
-        w = xmax_ - xmin_
+        h = ymax - ymin
+        w = xmax - xmin
         if h > 1 and w > 1:
             ratio = w / h
             if ratio < aspect_ratio_range[0] or ratio > aspect_ratio_range[1]:
-                return ymin_, ymax_, xmin_, xmax_
+                break
 
-        if None not in (ymin, ymax, xmin, xmax):
-            return ymin, ymax, xmin, xmax
-
+    return ymin, ymax, xmin, xmax
 
 def generate_backgrounds(crops_per_page=5, min_size=40):
     data = pd.read_csv(MANGA109_ROOT / "data.csv")
