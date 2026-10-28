@@ -88,15 +88,29 @@ distribution: same fonts, texts, layout semantics, style probabilities and the
 unchanged background/bubble code. (A webview-based renderer such as Tauri was
 deliberately not used: it is still a full browser engine behind IPC plus a
 Rust toolchain, i.e. all of the old overhead with none of the speedup and no
-Python screenshot API.) The legacy Chrome renderer is kept as
-`BrowserRenderer` in `renderer.py` for side-by-side comparison where Chrome is
-available, and `tests/test_pil_renderer.py` covers the new renderer.
+Python screenshot API.) `tests/test_pil_renderer.py` covers the renderer.
 
 High-level generation pipeline is as follows:
 1. Preprocess text (truncate and/or split into lines, add random furigana).
 2. Render text on a transparent background, using HTML engine.
 3. Select background image from backgrounds dataset.
 4. Overlay the text on the background, optionally drawing a bubble around the text.
+
+## Real handwritten kana (optional)
+
+Pass `--real_kana` to `run_generate` to render Japanese kana from a harvested
+handwriting bank instead of the font (kanji, Latin, digits and punctuation stay
+font-rendered). It is off by default, like the `sfx` split.
+
+```bash
+python -m manga_ocr_dev.synthetic_data_generator.run_generate \
+  --package 0 --n_random 2000 --real_kana --kana_bank /mnt/real-kana-final
+```
+
+The bank root is discovered from `--kana_bank`, then `REAL_KANA_ROOT`, then
+`assets/handwriting` and the conventional `/mnt` dataset mounts. See
+[`../../docs/real-kana.md`](../../docs/real-kana.md) for the bank pipeline and
+matching rules.
 
 # Examples
 

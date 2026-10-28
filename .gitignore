@@ -138,3 +138,18 @@ dmypy.json
 cython_debug/
 
 .idea/
+.ruff_cache/
+*.bak
+*.backup.*
+*.tmp.*
+*.checkpoint.*
+
+# Local-only datasets, models and scratch files (not part of the repo)
+/manga-ocr-charspot-small/
+/assets/handwriting/
+/assets/handwriting-classifier/
+/kanjivg_cache/
+/*.patch
+*.patch
+/manga_panel_long.png
+/synthetic_handwritten_manga.png

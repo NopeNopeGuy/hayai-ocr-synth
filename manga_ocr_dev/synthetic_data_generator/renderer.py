@@ -1,94 +1,49 @@
 """Fast Pillow-based text renderer for synthetic manga OCR data.
 
-The previous implementation used ``html2image`` (a wrapper around a headless
-Chrome/Chromium browser) to typeset text. Spawning a browser process per image
-is very slow and requires a Chrome installation. This module renders the same
-text layouts (vertical/horizontal text, furigana/ruby, tate-chu-yoko,
+Renders text layouts (vertical/horizontal text, furigana/ruby, tate-chu-yoko,
 stroke/shadow styles) directly with Pillow, with no browser, no temp files
 and no subprocesses.
 
-Public API is intentionally identical to the old browser renderer, so
-``SyntheticDataGenerator`` works unchanged::
+Public API::
 
     Renderer().render(lines, override_css_params) -> (img_bgra, params)
-
-``img_bgra`` is a ``uint8`` BGRA numpy array in BGR channel order (same as
-``cv2.imread(..., cv2.IMREAD_UNCHANGED)`` returned before), so the downstream
-``render_background`` pipeline behaves exactly as before.
-
-A note on "identical" images: pixel-for-pixel identical output across two
-different rendering engines (Blink vs. FreeType/HarfBuzz) is not achievable -
-glyph rasterization, shaping and line breaking differ by design. What this
-renderer preserves is the training distribution: same fonts, same texts, same
-layout semantics (vertical ratio, ruby, tate-chu-yoko), same style
-probabilities (stroke/shadow/none) and the unchanged background/bubble
-pipeline. The legacy Chrome renderer is kept as ``BrowserRenderer`` below for
-side-by-side checks where Chrome is available.
-
-Besides the uniform grid layout (every line the same size, aligned to a
-regular grid), the renderer supports an ``irregular`` layout mode that mimics
-challenging hand-lettered manga crops: each line (column in vertical text,
-row in horizontal text) gets its own font size and its own start offset, and
-optionally per-character emphasis sizing, baseline wobble, slight per-glyph
-tilt and shrunken small kana. See ``IRREGULAR_PROB`` and
-``get_random_css_params`` for the sampling distribution.
-
-Besides dialogue, the renderer supports an ``sfx`` mode for sound-effect /
-onomatopoeia lettering: huge type, per-glyph size/tilt variation, curved
-(arc/wave/diagonal) baselines, true per-glyph perspective warps, thick
-outlines with optional double (black-outer/white-inner) edges, radiating
-speedlines and jagged burst balloons behind the text. SFX is a separate
-dataset split (see ``get_random_sfx_params``); decorative shapes are never
-part of the ground truth - only font-rendered glyphs (including ``♡♥★`` when
-they are characters in the string) are labeled.
-
-Besides black ink, the renderer samples coloured text fills for the majority
-of images: red, hot pink (weighted heavily), orange, yellow, green, lime,
-cyan, blue, purple, magenta, brown and light pink (see ``COLOR_PROB``,
-``SFX_COLOR_PROB`` and ``_sample_text_color``). A good share of coloured
-samples mixes several colours within a single image - ``per_line`` paints
-each column/row its own colour (emphasis lettering), ``per_char`` paints
-every glyph its own colour (rainbow SFX) - see ``MULTICOLOR_PROB``,
-``SFX_MULTICOLOR_PROB`` and ``color_mode``/``text_colors`` params. Coloured
-samples are returned by ``render`` as 3-channel BGR images so the hue
-survives; black/white samples stay grayscale, exactly as before.
-
-Legibility is computed programmatically, not by restricting the palette:
-``_relative_luminance``/``_contrast_ratio`` implement WCAG contrast, and
-``_ensure_legible_outline`` plus per-glyph edges in ``_assign_op_colors``
-give light fills (yellow, cyan, light pink, ...) a black outline and dark
-fills a white one, so even neon ink stays readable on white bubbles and
-light art. Force colours with
-``override_css_params={"text_color": "pink"}`` (hex like ``"#ff5090"``
-works too), force mixed lettering with
-``{"text_color": "red", "color_mode": "per_char",
-"text_colors": ["red", "yellow", "cyan", "pink"]}``, and force grayscale
-with ``{"text_color": "black", "color_mode": "solid"}``.
-
-Why not Tauri (or another webview)? A webview is still a full browser engine
-(WebKit/WebView2/WKWebView) behind IPC + native build tooling, with no Python
-screenshot API. It would keep the per-image engine overhead while adding a
-Rust toolchain dependency, so it is slower to install, slower to run and
-harder to parallelize than plain Pillow.
 """
 
-import math
 from collections import OrderedDict
+import ctypes
+import gc
+import logging
+import math
+import os
 import re
 import threading
 
 import albumentations as A
 import cv2
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-from manga_ocr_dev.env import BACKGROUND_ANIMETEXT_DIR, BACKGROUND_DIR
+from manga_ocr_dev.env import ASSETS_PATH, BACKGROUND_ANIMETEXT_DIR, BACKGROUND_DIR
 from manga_ocr_dev.synthetic_data_generator.utils import (
     MissingGlyphError,
     get_background_df,
     is_ascii,
     is_drawable,
 )
+
+try:
+    _LIBC = ctypes.CDLL("libc.so.6")
+except Exception:
+    _LIBC = None
+
+
+def _trim_native_memory():
+    gc.collect()
+    if _LIBC is not None:
+        try:
+            _LIBC.malloc_trim(0)
+        except Exception:
+            pass
 
 
 def get_default_background_df():
@@ -101,73 +56,126 @@ def get_default_background_df():
         pass
     return get_background_df(BACKGROUND_DIR)
 
+
 BODY_MARGIN = 20  # px, matches the old CSS ``body { margin: 20px; }``
 RUBY_SCALE = 0.45  # furigana size relative to the main font size
 RUBY_GAP = 6  # px gap between base text and furigana
 MIN_PAD = 4  # extra padding so stroke/blur never clips at canvas edges
 
-# Irregular ("challenging crop") layout defaults. Mild settings reproduce
-# realscan-style crops (per-line sizes + staggered line starts); strong
-# settings add enhanced-style per-character emphasis sizing, baseline wobble,
-# slight tilt and shrunken small kana.
-IRREGULAR_PROB = 0.35
-LINE_SCALE_RANGE = (0.65, 1.45)
-LINE_SHIFT_EM = 1.2  # max per-line start offset, in units of the base font size
-CHAR_SCALE_RANGE = (0.7, 1.5)
-CHAR_JITTER_PROB = 0.5  # per-line probability of enabling per-character sizing
-WOBBLE_EM = 0.07  # max perpendicular baseline wobble, in units of the line font size
-ROTATE_DEG = 5.0  # max absolute per-character tilt, in degrees
+# Real handwritten-kana bank hook.  It is opt-in (``real_kana=True``), just
+# like the SFX split: the default font rendering path is untouched.
+REAL_KANA_PROB = 0.60
+_BANK_ROOT_ENV = "REAL_KANA_ROOT"
+_REAL_KANA_BANK_CACHE = {}
+_REAL_KANA_BANK_LOCK = threading.Lock()
+_REAL_KANA_MISSING_WARNED = False
+log = logging.getLogger(__name__)
+
+
+def _bank_root_candidates(default=None):
+    """Yield bank roots in priority order (explicit root wins)."""
+
+    from pathlib import Path
+
+    if default is not None:
+        yield Path(default).expanduser()
+        return
+    env_root = os.environ.get(_BANK_ROOT_ENV)
+    if env_root:
+        yield Path(env_root).expanduser()
+    yield ASSETS_PATH / "handwriting"
+    # Conventional dataset mounts used by the bank pipeline.
+    yield Path("/mnt/real-kana-final")
+    yield Path("/mnt/real-kana-bank")
+
+
+def _is_bank_root(root) -> bool:
+    return (root / "manifest.jsonl").is_file() or any((root / "glyphs").glob("*/*.png"))
+
+
+def _get_real_kana_bank(root=None, cfg=None):
+    """Load and cache a bank, or return ``None`` when none is installed."""
+
+    from pathlib import Path
+
+    roots = list(_bank_root_candidates(root))
+    chosen = None
+    for candidate in roots:
+        if _is_bank_root(candidate):
+            chosen = candidate
+            break
+    if chosen is None:
+        global _REAL_KANA_MISSING_WARNED
+        if root is not None and not _REAL_KANA_MISSING_WARNED:
+            log.warning("real-kana bank not found at %s; falling back to fonts", root)
+            _REAL_KANA_MISSING_WARNED = True
+        return None
+    key = str(chosen.resolve())
+    with _REAL_KANA_BANK_LOCK:
+        bank = _REAL_KANA_BANK_CACHE.get(key)
+        if bank is not None:
+            return bank
+        try:
+            from manga_ocr_dev.real_kana.bank import KanaBank
+
+            bank = KanaBank.load(chosen, cfg=cfg)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cannot load real-kana bank at %s: %s", chosen, exc)
+            return None
+        _REAL_KANA_BANK_CACHE[key] = bank
+        return bank
+
+
+IRREGULAR_PROB = 0.55
+LINE_SCALE_RANGE = (0.6, 1.55)
+LINE_SHIFT_EM = 1.5
+CHAR_SCALE_RANGE = (0.65, 1.6)
+CHAR_JITTER_PROB = 0.55
+WOBBLE_EM = 0.09
+ROTATE_DEG = 7.0
 SMALL_KANA = frozenset("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ")
 SMALL_KANA_SCALE = (0.55, 0.8)
-MIN_CHAR_SIZE = 8  # px floor for scaled glyphs (same floor as furigana)
+MIN_CHAR_SIZE = 8
 
-# Whole-block slant (shear) probabilities. Slanted emphasis lettering shows up
-# occasionally in manga, from a mild italic-like lean to a dramatic skew.
-SLANT_PROB = 0.12
-SLANT_MILD_RANGE = (8.0, 15.0)  # degrees
-SLANT_STRONG_RANGE = (20.0, 32.0)  # degrees ("very slanted")
-SLANT_STRONG_PROB = 0.33  # fraction of slanted samples that go strong
+SLANT_PROB = 0.22
+SLANT_MILD_RANGE = (8.0, 15.0)
+SLANT_STRONG_RANGE = (20.0, 38.0)
+SLANT_STRONG_PROB = 0.4
 
-# SFX (sound-effect) lettering defaults. SFX is a separate dataset split with
-# huge type, curved baselines, per-glyph perspective warps, thick outlines,
-# speedlines and burst balloons. No decorative (non-font) symbols are drawn -
-# only font glyphs count as text.
-SFX_FONT_SIZE_RANGE = (90, 150)
-SFX_CHAR_SCALE_RANGE = (0.8, 1.9)
-SFX_LINE_SCALE_RANGE = (0.85, 1.2)
-SFX_PERSP_RANGE = (0.12, 0.28)
-SFX_ROTATE_DEG = 22.0  # max absolute per-glyph tilt before curve tangent
-SFX_BLOCK_ROTATE_RANGE = (-18.0, 18.0)
-SFX_CURVE_MODES = ("arc", "wave", "diagonal", "straight", "zigzag", "bounce", "hill")
-SFX_CURVE_P = (0.22, 0.18, 0.16, 0.14, 0.10, 0.10, 0.10)
-SFX_ADJACENT_SCALE_MAX = 1.35  # max size ratio between neighbouring glyphs (legibility)
-SFX_ASPECT_MAX = 0.4  # max per-glyph non-uniform stretch (tall/wide glyphs)
-SFX_SPACING_RANGE = (-0.06, 0.25)  # letter spacing in em (tight overlap .. airy)
-SFX_CURVE_AMP_RANGE = (0.15, 0.45)  # in em of the line font size
+DIALOGUE_FONT_SIZE_RANGE = (26, 56)
+DIALOGUE_LINE_HEIGHT_RANGE = (0.22, 0.62)
+
+SFX_FONT_SIZE_RANGE = (38, 190)
+SFX_CHAR_SCALE_RANGE = (0.75, 2.1)
+SFX_LINE_SCALE_RANGE = (0.8, 1.3)
+SFX_PERSP_RANGE = (0.10, 0.45)
+SFX_ROTATE_DEG = 35.0
+SFX_BLOCK_ROTATE_RANGE = (-35.0, 35.0)
+SFX_BLOCK_ROTATE_90_PROB = 0.05
+SFX_CURVE_MODES = ("arc", "wave", "diagonal", "straight", "zigzag", "bounce", "hill", "steep", "circle")
+SFX_CURVE_P = (0.18, 0.15, 0.13, 0.12, 0.09, 0.09, 0.09, 0.08, 0.07)
+SFX_ADJACENT_SCALE_MAX = 1.8
+SFX_ASPECT_MAX = 0.7
+SFX_SPACING_RANGE = (-0.18, 0.22)
+SFX_CURVE_AMP_RANGE = (0.15, 0.6)
 SFX_SPEEDLINE_PROB = 0.6
-SFX_SPEEDLINE_N_RANGE = (24, 64)
+SFX_SPEEDLINE_N_RANGE = (24, 80)
 SFX_BURST_PROB = 0.35
 SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_VERTICAL_PROB = 0.4
-# Tight SFX crops: the crop box hugs the lettering (fill + stroke/outline),
-# never the decor (speedlines, burst balloon, shadow blur), which is simply
-# clipped by it. Margin around the ink as a fraction of the shorter side.
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
-SFX_CROP_MARGIN_MIN = 2  # px
-SFX_INK_ALPHA_THRESHOLD = 8  # ignore near-invisible anti-alias fringe
+SFX_CROP_MARGIN_MIN = 2
+SFX_INK_ALPHA_THRESHOLD = 8
+TRUNC_PROB = 0.2
+TRUNC_FRAC_RANGE = (0.10, 0.30)
+TRUNC_INK_BITE_EM = 0.10
+SHADOW_GLOW_GAIN = 2.0
 
-# Coloured text defaults. Colour pages, covers and SFX use chromatic ink all
-# the time (red emphasis, hot pink, blue, orange, ...), so the majority of
-# samples is rendered with a chromatic fill and a good share of those mixes
-# several colours within a single image (per-line or per-glyph). Coloured
-# samples are returned as 3-channel BGR images; black/white samples stay
-# grayscale, exactly as before.
-COLOR_PROB = 0.6  # dialogue fraction with chromatic text fill
-SFX_COLOR_PROB = 0.7  # SFX fraction with chromatic text fill
-MULTICOLOR_PROB = 0.4  # fraction of coloured dialogue with mixed colours
-SFX_MULTICOLOR_PROB = 0.5  # fraction of coloured SFX with mixed colours
-# Per-line (each column/row its own colour) reads like emphasis lettering;
-# per-char (rainbow glyphs) reads like playful SFX.
+COLOR_PROB = 0.18
+SFX_COLOR_PROB = 0.28
+MULTICOLOR_PROB = 0.35
+SFX_MULTICOLOR_PROB = 0.4
+MUTED_COLOR_PROB = 0.5
 MULTICOLOR_MODES = ("per_line", "per_char")
 TEXT_COLOR_NAMES = (
     "red",
@@ -185,55 +193,65 @@ TEXT_COLOR_NAMES = (
 )
 TEXT_COLOR_P = (0.20, 0.18, 0.08, 0.08, 0.07, 0.07, 0.04, 0.05, 0.09, 0.05, 0.05, 0.04)
 
-# Text border (outline) sampling. Outlines used to be applied to ~80% of
-# dialogue samples with sizes up to 8 px on 48 px type (a fat halo that makes
-# every glyph trivially separable from the art). Now most samples have no or a
-# hairline edge; fat edges are rare.
-STROKE_PROB = 0.40  # dialogue: fraction with an outline
-SHADOW_PROB = 0.08  # dialogue: fraction with a soft glow
+STROKE_PROB = 0.40
+SHADOW_PROB = 0.08
 STROKE_SIZES = (1, 2, 3, 4, 6)
 STROKE_SIZE_P = (0.35, 0.30, 0.20, 0.10, 0.05)
-SFX_STROKE_FRAC = 0.05  # SFX outline cap, fraction of font size
-SFX_OUTER_RING = 2  # px added by the black outer ring of a double outline
+SFX_STROKE_FRAC = 0.05
+SFX_OUTER_RING = 2
 
-# Background difficulty. The old pipeline crushed contrast on every no-bubble
-# sample (contrast_limit=(-0.8,-0.3), p=1), blurred 30% of backgrounds, and
-# stretched mismatched-aspect crops with Resize, which blurs them further. The
-# result was flat, very dark or very light backgrounds. Now backgrounds keep
-# their texture and their mean brightness is pushed towards mid-tones or
-# towards the ink's own brightness (the hard case for an OCR model).
 BG_BLUR_PROB = 0.08
 BG_TONE_MODES = ("natural", "midtone", "ink_match")
-BG_TONE_P = (0.25, 0.35, 0.40)
-BG_MIN_STD = (22.0, 60.0)  # background texture std is lifted to at least this
-BG_INK_OFFSET = (60.0, 110.0)  # ink_match: |bg_mean - edge_lum| range
-# Hard legibility guarantee. Around the outermost ink pixels (the visible
-# glyph edge, outline included) at most BG_MAX_LOW_CONTRAST of the surrounding
-# background pixels may be within BG_MIN_EDGE_DIFF grey levels of the edge
-# colour. Anything worse is regenerated, so white-on-white can never ship.
+BG_TONE_P = (0.2, 0.35, 0.45)
+BG_MIN_STD = (30.0, 75.0)
+BG_INK_OFFSET = (35.0, 95.0)
 BG_MIN_EDGE_DIFF = 75.0
 BG_MAX_LOW_CONTRAST = 0.20
 BG_MAX_TRIES = 6
-BG_SCREENTONE_PROB = 0.25
-BG_GRADIENT_PROB = 0.25
+BG_CAMO_PROB = 0.15
+BG_SCREENTONE_PROB = 0.32
+BG_GRADIENT_PROB = 0.32
 BG_NOISE_PROB = 0.35
-# Bubble fill variants: white used to be the only one.
+BG_HATCH_PROB = 0.22
+BG_COLOR_ART_PROB = 0.65
 BUBBLE_FILL_MODES = ("white", "gray", "tint", "tone", "dark")
 BUBBLE_FILL_P = (0.45, 0.20, 0.10, 0.15, 0.10)
 
+HOLLOW_PROB = 0.12
+GRADIENT_FILL_PROB = 0.12
+STRIPE_FILL_PROB = 0.10
+EXTRUDE_PROB = 0.15
+DISTRESS_PROB = 0.22
+FAINT_PROB = 0.10
+FG_OCCLUDE_PROB = 0.35
+DISTRACTOR_PROB = 0.0
+DEGRADE_JPEG_PROB = 0.5
+DEGRADE_SCALE_PROB = 0.3
+DEGRADE_BLUR_PROB = 0.25
+DEGRADE_SHARPEN_PROB = 0.25
+DEGRADE_PHOTO_PROB = 0.2
+DEGRADE_COLOR_JITTER_PROB = 0.6
+
+INK_DENSITY_PROB = 0.5
+INK_DENSITY_DEPTH = (0.05, 0.25)
+INK_EDGE_PROB = 0.5
+INK_EDGE_SIGMA = (8.0, 28.0)
+SCAN_ILLUM_PROB = 0.4
+SCAN_ILLUM_DEPTH = (0.03, 0.18)
+SCAN_SPREAD_PROB = 0.2
+SCAN_DEFOCUS_PROB = 0.3
+SCAN_DEFOCUS_SIGMA = (0.35, 0.9)
+SCAN_NOISE_PROB = 0.35
+SCAN_NOISE_SIGMA = (2.0, 7.0)
+
 RUBY_RE = re.compile(r"<ruby>(.*?)<rt>(.*?)</rt></ruby>")
-TCY_RE = re.compile(r'<span[^>]*?text-combine-upright[^>]*?>(.*?)</span>')
+TCY_RE = re.compile(r"<span[^>]*?text-combine-upright[^>]*?>(.*?)</span>")
 TAG_RE = re.compile(r"<[^>]+>")
 
 _NAMED_COLORS = {
     "black": (0, 0, 0, 255),
     "white": (255, 255, 255, 255),
     "transparent": (0, 0, 0, 0),
-    # Chromatic ink. Vivid print-like tones, including bright yellow/cyan and
-    # light pinks - legibility is guaranteed programmatically (see
-    # _relative_luminance/_contrast_ratio/_ensure_legible_outline), which picks
-    # a contrasting outline per glyph instead of restricting the palette.
-    # Hex codes still allow any exact shade via override_css_params.
     "red": (255, 0, 0, 255),
     "pink": (255, 80, 160, 255),
     "lightpink": (255, 170, 200, 255),
@@ -250,20 +268,40 @@ _NAMED_COLORS = {
     "brown": (150, 75, 0, 255),
 }
 
-# Bounded LRU. Every (font, size) pair is a separate FreeType face costing
-# several MB; SFX draws each glyph at its own size, so an unbounded dict grows
-# with (#fonts x #sizes) and eats all RAM (-> swap thrash that looks like a hang).
-_FONT_CACHE_MAX = 48
+_FONT_CACHE_MAX = 16
+_LARGE_FONT_BYTES = 25 * (1 << 20)  # 25 MB: evict giant fonts as soon as sample switches
+_BG_IMAGE_CACHE = OrderedDict()
+_BG_IMAGE_CACHE_MAX = 8
+
+
+def _read_bg_cached(path: str):
+    img = _BG_IMAGE_CACHE.get(path)
+    if img is not None:
+        _BG_IMAGE_CACHE.move_to_end(path)
+        return img
+    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    if img is not None:
+        h, w = img.shape[:2]
+        if max(h, w) > 1200:
+            scale = 1200.0 / max(h, w)
+            img = cv2.resize(img, (max(8, int(w * scale)), max(8, int(h * scale))), interpolation=cv2.INTER_AREA)
+        _BG_IMAGE_CACHE[path] = img
+        while len(_BG_IMAGE_CACHE) > _BG_IMAGE_CACHE_MAX:
+            _BG_IMAGE_CACHE.popitem(last=False)
+    return img
+
+
 _FONT_CACHE = OrderedDict()
 _FONT_CACHE_LOCK = threading.Lock()
+_RENDER_COUNT = 0
+_LAST_HUGE_FONT: str | None = None
 
 
 def _normalize_color(value, default="black"):
-    """Map a CSS color name (or hex, or legacy tuple bug) to an RGBA tuple."""
+    """Map a CSS color name, hex code, or color tuple to an RGBA tuple."""
     if value is None:
         value = default
     if isinstance(value, (tuple, list)):
-        # legacy get_random_css_params accidentally produced ("white",)
         value = value[0] if len(value) > 0 else default
     if not isinstance(value, str):
         value = default
@@ -287,7 +325,6 @@ def _normalize_color(value, default="black"):
 
 
 def _sample_text_color(sfx=False):
-    """Sample a text fill color name: often chromatic, else black."""
     prob = SFX_COLOR_PROB if sfx else COLOR_PROB
     if np.random.rand() >= prob:
         return "black"
@@ -295,7 +332,6 @@ def _sample_text_color(sfx=False):
 
 
 def _sample_text_colors(n, sfx=False):
-    """Sample ``n`` distinct chromatic color names for mixed-colour lettering."""
     n = max(2, int(n))
     chosen = []
     for _ in range(20):
@@ -312,14 +348,23 @@ def _sample_text_colors(n, sfx=False):
 
 
 def _sample_color_mode(sfx=False):
-    """Sample a mixed-colour layout: per-line emphasis vs per-glyph rainbow."""
     if sfx:
         return str(np.random.choice(MULTICOLOR_MODES, p=[0.4, 0.6]))
     return str(np.random.choice(MULTICOLOR_MODES, p=[0.7, 0.3]))
 
 
+def _maybe_multicolor(params, text_color, sfx=False):
+    prob = SFX_MULTICOLOR_PROB if sfx else MULTICOLOR_PROB
+    if text_color == "black" or np.random.rand() >= prob:
+        return params
+    params["color_mode"] = _sample_color_mode(sfx=sfx)
+    params["text_colors"] = _sample_text_colors(int(np.random.randint(2, 5)), sfx=sfx)
+    if text_color not in params["text_colors"]:
+        params["text_colors"][0] = text_color
+    return params
+
+
 def _params_are_color(params):
-    """True when params describe chromatic ink (solid or mixed)."""
     mode = str(params.get("color_mode", "solid"))
     if mode in ("per_line", "per_char"):
         return True
@@ -330,20 +375,6 @@ def _params_are_color(params):
 
 
 def _assign_op_colors(ops, params):
-    """Assign per-op ``fill``/``stroke``/``shadow`` RGBA tuples.
-
-    ``solid`` (default) paints every glyph with ``text_color``. ``per_line``
-    paints each line (column in vertical text, row in horizontal text) with
-    its own colour from ``text_colors``. ``per_char`` paints every glyph with
-    its own colour from ``text_colors`` (rainbow SFX / emphasis lettering).
-    Ruby (furigana) shares its base line's colour in ``per_line`` mode and
-    gets its own colour in ``per_char`` mode.
-
-    Legibility is computed per glyph (see ``_needs_dark_outline``): light
-    fills (yellow, cyan, light pink, ...) get a black outline, dark fills a
-    white one, so every glyph stays readable on white bubbles and light art
-    regardless of the sampled hue.
-    """
     shadow_fallback = _normalize_color(params.get("shadow_color", "white"), "white")
     black = (0, 0, 0, 255)
     white = (255, 255, 255, 255)
@@ -353,7 +384,7 @@ def _assign_op_colors(ops, params):
 
     mode = str(params.get("color_mode", "solid"))
     if mode not in ("per_line", "per_char"):
-        fill = _normalize_color(params.get("text_color", "black"), "black")
+        fill = _maybe_mute_fill(_normalize_color(params.get("text_color", "black"), "black"))
         for op in ops:
             op["fill"] = fill
             op["stroke"] = contrasting_edge(fill)
@@ -362,7 +393,7 @@ def _assign_op_colors(ops, params):
     colors = params.get("text_colors", None)
     if not isinstance(colors, (list, tuple)) or not len(colors):
         colors = _sample_text_colors(3)
-    fills = [_normalize_color(c, "black") for c in colors]
+    fills = [_maybe_mute_fill(_normalize_color(c, "black")) for c in colors]
     if mode == "per_line":
         line_to_fill = {}
         for op in ops:
@@ -381,7 +412,6 @@ def _assign_op_colors(ops, params):
 
 
 def _is_chromatic_color(value):
-    """True when a color spec is a chromatic (non-gray, non-transparent) ink."""
     try:
         r, g, b, a = _normalize_color(value, "black")
     except (TypeError, ValueError):
@@ -392,7 +422,6 @@ def _is_chromatic_color(value):
 
 
 def _relative_luminance(rgba):
-    """WCAG relative luminance of an RGB(A) color, in 0..1."""
     r, g, b = (c / 255.0 for c in rgba[:3])
 
     def lin(c):
@@ -402,22 +431,16 @@ def _relative_luminance(rgba):
 
 
 def _contrast_ratio(a, b):
-    """WCAG contrast ratio between two RGB(A) colors, in 1..21."""
     la = _relative_luminance(_normalize_color(a, "black"))
     lb = _relative_luminance(_normalize_color(b, "black"))
     hi, lo = (la, lb) if la >= lb else (lb, la)
     return (hi + 0.05) / (lo + 0.05)
 
 
-# Fill-vs-white contrast below this gets a dark outline: the fill alone is too
-# light to read on a white bubble (yellow/cyan/light pink), so the glyph shape
-# is defined by a black edge instead. 3.0 is the WCAG large-text threshold;
-# our body type (48px) and SFX (90-150px) both count as large text.
 MIN_FILL_CONTRAST = 3.0
 
 
 def _needs_dark_outline(fill_rgba):
-    """True when a fill needs a black (not white) outline to stay legible."""
     white = (255, 255, 255, 255)
     la = _relative_luminance(fill_rgba)
     lw = _relative_luminance(white)
@@ -425,26 +448,32 @@ def _needs_dark_outline(fill_rgba):
     return (hi + 0.05) / (lo + 0.05) < MIN_FILL_CONTRAST
 
 
-def _ensure_legible_outline(params):
-    """Force a contrasting outline/shadow when the fill is too light.
+def _desaturate_rgba(fill_rgba, amount=0.4):
+    r, g, b, a = (int(v) for v in fill_rgba[:4])
+    lum = int(round(0.299 * r + 0.587 * g + 0.114 * b))
+    k = float(np.clip(amount, 0.0, 1.0))
+    return (int(round(r + (lum - r) * k)), int(round(g + (lum - g) * k)), int(round(b + (lum - b) * k)), a)
 
-    Operates on a sampled ``params`` dict in place: light fills (yellow,
-    cyan, light pink, ...) get a black stroke (or black shadow when the
-    variant is a glow) at least 2px wide, so the glyph stays readable on
-    white bubbles and light art. Dark fills keep the sampled white halo,
-    which pops on dark art. Mixed-colour samples are handled per glyph at
-    render time (see ``_assign_op_colors``); here we only guarantee the
-    shared ``stroke_size`` is non-zero so those per-glyph outlines can draw.
-    """
+
+def _maybe_mute_fill(fill_rgba):
+    try:
+        r, g, b, a = fill_rgba[:4]
+    except (TypeError, ValueError):
+        return fill_rgba
+    if r == g == b or a == 0:
+        return fill_rgba
+    if np.random.rand() < MUTED_COLOR_PROB:
+        return _desaturate_rgba(fill_rgba, float(np.random.uniform(0.25, 0.65)))
+    return fill_rgba
+
+
+def _ensure_legible_outline(params):
     mode = str(params.get("color_mode", "solid"))
     if mode in ("per_line", "per_char"):
         if int(params.get("stroke_size", 0) or 0) <= 0 and int(params.get("shadow_size", 0) or 0) <= 0:
             params["stroke_size"] = 2
-            params["stroke_color"] = "white"  # fallback; per-glyph strokes override
+            params["stroke_color"] = "white"
         elif int(params.get("stroke_size", 0) or 0) <= 0:
-            # Glow-only mixed lettering: make the glow dark so light glyphs
-            # keep an edge; dark glyphs still read via their fill. Kept small
-            # so it reads as a glow, not a double character.
             params["shadow_color"] = "black"
             params["shadow_size"] = max(int(params.get("shadow_size", 0) or 0), 3)
         return params
@@ -460,8 +489,6 @@ def _ensure_legible_outline(params):
     else:
         params["stroke_size"] = 2
         params["stroke_color"] = "black"
-    # SFX without its black outer edge would leave a light fill in a white
-    # halo; the outer edge guarantees the silhouette on any background.
     if params.get("sfx") and int(params.get("stroke_size", 0) or 0) >= 5:
         params["sfx_double_outline"] = True
     return params
@@ -469,14 +496,27 @@ def _ensure_legible_outline(params):
 
 def _get_font(font_path, size):
     """Load (and cache) a TrueType/OpenType font. Thread-safe."""
-    key = (str(font_path), int(size))
+    global _LAST_HUGE_FONT
+    p_str = str(font_path)
+    sz = int(size)
+    key = (p_str, sz)
     with _FONT_CACHE_LOCK:
+        if _LAST_HUGE_FONT is not None and _LAST_HUGE_FONT != p_str:
+            _FONT_CACHE.clear()
+            _LAST_HUGE_FONT = None
         font = _FONT_CACHE.get(key)
         if font is None:
-            font = ImageFont.truetype(str(font_path), int(size))
+            font = ImageFont.truetype(p_str, sz)
+            try:
+                is_huge = os.path.getsize(p_str) > _LARGE_FONT_BYTES
+            except OSError:
+                is_huge = False
+            if is_huge:
+                _LAST_HUGE_FONT = p_str
+            max_entries = 4 if is_huge else _FONT_CACHE_MAX
             _FONT_CACHE[key] = font
-            while len(_FONT_CACHE) > _FONT_CACHE_MAX:
-                _FONT_CACHE.popitem(last=False)  # evict least recently used
+            while len(_FONT_CACHE) > max_entries:
+                _FONT_CACHE.popitem(last=False)
         else:
             _FONT_CACHE.move_to_end(key)
         return font
@@ -509,11 +549,7 @@ def _default_font_path():
 
 
 def _assert_no_tofu(parsed, font_path):
-    """Hard guarantee: never rasterize a character the font cannot draw.
-
-    A missing glyph would come out as a "tofu" box while the label still names
-    the real character. Raising here makes that impossible.
-    """
+    """Hard guarantee: never rasterize a character the font cannot draw."""
     for tokens in parsed:
         for tok in tokens:
             text = "".join(_strip_tags(part) for part in tok[1:] if isinstance(part, str))
@@ -527,7 +563,6 @@ def _strip_tags(s):
 
 
 def _parse_inline(s):
-    """Split a string without ruby into text/tcy tokens."""
     tokens = []
     pos = 0
     for m in TCY_RE.finditer(s):
@@ -541,10 +576,6 @@ def _parse_inline(s):
 
 
 def _parse_line(line):
-    """Split a markup line into text/ruby/tcy tokens.
-
-    Returns a list of ("text", str) | ("ruby", base, rt) | ("tcy", str).
-    """
     tokens = []
     pos = 0
     for m in RUBY_RE.finditer(line):
@@ -557,42 +588,321 @@ def _parse_line(line):
     return tokens
 
 
+def _hatch_overlay(h, w, strength=0.35):
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    ang = float(np.random.uniform(0, np.pi))
+    period = float(np.random.uniform(4.0, 9.0))
+    u = (xx * np.cos(ang) + yy * np.sin(ang)) * (2 * np.pi / period)
+    lines = (np.sin(u) > float(np.random.uniform(0.2, 0.7))).astype(np.float32)
+    mask = (np.random.rand(h, w).astype(np.float32) < float(np.random.uniform(0.3, 0.7))).astype(np.float32)
+    return (lines * mask * float(strength)).astype(np.float32)
+
+
+def _colorize_background(bg_bgr, ref_bgr, strength=0.5):
+    try:
+        ref = np.asarray(ref_bgr, dtype=np.float32).reshape(1, 1, 3)
+        ref_hsv = cv2.cvtColor(ref.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+    except Exception:  # noqa: BLE001
+        return bg_bgr
+    bg_hsv = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+    dh = (ref_hsv[0, 0, 0] - bg_hsv[:, :, 0] + 90.0) % 180.0 - 90.0
+    bg_hsv[:, :, 0] = (bg_hsv[:, :, 0] + dh * float(strength)) % 180.0
+    bg_hsv[:, :, 1] = np.clip(
+        bg_hsv[:, :, 1] * float(np.random.uniform(0.6, 1.2)) + ref_hsv[0, 0, 1] * 0.25 * float(strength),
+        0,
+        255,
+    )
+    out = cv2.cvtColor(np.clip(bg_hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+    h, w = out.shape[:2]
+    wash = np.zeros_like(out, dtype=np.float32)
+    c = np.asarray(ref_bgr, dtype=np.float32)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    ang = float(np.random.uniform(0, 2 * np.pi))
+    g = ((xx - w / 2) * np.cos(ang) + (yy - h / 2) * np.sin(ang)) / max(1.0, float(np.abs((w + h) / 2)))
+    wash += (c[None, None, :] * (0.5 + 0.5 * g)[..., None] * 0.25 * float(strength)).astype(np.float32)
+    return np.clip(out.astype(np.float32) * 0.8 + wash * 0.2, 0, 255).astype(np.uint8)
+
+
+def _apply_ink_modulation(main_layer, mode):
+    if mode not in ("gradient", "stripe"):
+        return main_layer
+    arr = np.array(main_layer)
+    alpha = arr[:, :, 3]
+    m = alpha > 8
+    if not m.any():
+        return main_layer
+    h = arr.shape[0]
+    if mode == "gradient":
+        t = np.linspace(0.55, 1.15, h, dtype=np.float32)[:, None]
+        t = np.broadcast_to(t, (h, arr.shape[1]))
+        for c in range(3):
+            ch = arr[:, :, c].astype(np.float32)
+            ch[m] = np.clip(ch[m] * t[m], 0, 255)
+            arr[:, :, c] = ch.astype(np.uint8)
+    else:
+        yy, xx = np.mgrid[0 : arr.shape[0], 0 : arr.shape[1]].astype(np.float32)
+        if np.random.rand() < 0.5:
+            pat = (np.sin((xx + yy * 0.4) * 2 * np.pi / float(np.random.uniform(4, 9))) > 0).astype(np.float32)
+        else:
+            pat = ((_screentone(arr.shape[0], arr.shape[1]) > 0.35)).astype(np.float32)
+        dim = (1.0 - float(np.random.uniform(0.35, 0.6)) * pat).astype(np.float32)
+        for c in range(3):
+            ch = arr[:, :, c].astype(np.float32)
+            ch[m] *= dim[m]
+            arr[:, :, c] = np.clip(ch, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def _distress_rgba(main_layer, strength=0.5):
+    arr = np.array(main_layer)
+    h, w = arr.shape[:2]
+    a = arr[:, :, 3].astype(np.float32)
+    if (a > 8).sum() < 20:
+        return main_layer
+    n = max(1, int(float(strength) * float(np.random.randint(3, 9))))
+    for _ in range(n):
+        if np.random.rand() < 0.6:
+            x0, y0 = int(np.random.randint(0, w)), int(np.random.randint(0, h))
+            ang = float(np.random.uniform(0, 2 * np.pi))
+            ln = float(np.random.uniform(min(h, w) * 0.2, min(h, w) * 0.9))
+            x1, y1 = int(x0 + ln * np.cos(ang)), int(y0 + ln * np.sin(ang))
+            cv2.line(a, (x0, y0), (x1, y1), 0, max(1, int(np.random.randint(1, 3))))
+        else:
+            cx, cy = int(np.random.randint(0, w)), int(np.random.randint(0, h))
+            cv2.circle(a, (cx, cy), max(1, int(np.random.randint(2, 6))), 0, -1)
+    arr[:, :, 3] = np.clip(a, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def _draw_foreground_occluders_bgr(img_bgr, density=1.0):
+    h, w = img_bgr.shape[:2]
+    out = img_bgr
+    if np.random.rand() < 0.45 * density:
+        side = int(np.random.randint(0, 4))
+        th = int(np.random.randint(2, 7))
+        col = (0, 0, 0) if np.random.rand() < 0.8 else (255, 255, 255)
+        if side == 0:
+            cv2.line(out, (0, int(np.random.randint(0, h))), (w, int(np.random.randint(0, h))), col, th)
+        elif side == 1:
+            cv2.line(out, (int(np.random.randint(0, w)), 0), (int(np.random.randint(0, w)), h), col, th)
+        elif side == 2:
+            cv2.line(out, (0, 0), (w, h), col, th)
+        else:
+            cv2.rectangle(out, (0, 0), (w - 1, h - 1), col, th)
+    n = int(np.random.randint(2, 7) * density)
+    for _ in range(n):
+        x0, y0 = int(np.random.randint(0, w)), int(np.random.randint(0, h))
+        ang = float(np.random.uniform(0, 2 * np.pi))
+        ln = float(np.random.uniform(min(h, w) * 0.4, max(h, w) * 1.1))
+        x1, y1 = int(x0 + ln * np.cos(ang)), int(y0 + ln * np.sin(ang))
+        gray = int(np.random.randint(0, 255))
+        col = (gray, gray, gray) if out.ndim == 3 and out.shape[2] == 3 else gray
+        cv2.line(out, (x0, y0), (x1, y1), col, int(np.random.choice([1, 1, 2, 3])))
+    if np.random.rand() < 0.4 * density:
+        dots = _screentone(h, w)
+        f = out.astype(np.float32)
+        f *= (1.0 - float(np.random.uniform(0.15, 0.4)) * dots)[..., None] if out.ndim == 3 else (1.0 - 0.3 * dots)
+        out = np.clip(f, 0, 255).astype(np.uint8)
+    return out
+
+
+_DISTRACTOR_CHARS = {
+    "ja": list("アカサタナハマヤラワガザダバパドンビキクケコ0123456789"),
+    "ko": list("가나다라마바사아자차카타파하거너더러머버서어0123456789"),
+    "zh": list("的一是不了我有个人好这中大来上0123456789"),
+    "en": list("ABCDEFGHKMRWZabcdegkmwxyz0123456789"),
+}
+
+
+def _draw_distractor_fragments_bgr(img_bgr, font_path, cell=48, lang="ja"):
+    return img_bgr
+
+
+def _truncate_bgr(img, ink_box=None, bite_px=0, frac_range=TRUNC_FRAC_RANGE):
+    h, w = img.shape[:2]
+    f = float(np.random.uniform(*frac_range))
+    side = int(np.random.randint(0, 4))
+    want = int(h * f) if side in (0, 1) else int(w * f)
+    if ink_box is not None:
+        x0, y0, x1, y1 = ink_box
+        room = {0: y0, 1: h - y1, 2: x0, 3: w - x1}[side]
+        want = min(want, max(0, int(room)) + int(bite_px))
+    if want < 2:
+        return img
+    if side == 0:
+        out = img[want:, :, ...] if h - want >= 8 else img
+    elif side == 1:
+        out = img[: h - want, :, ...] if h - want >= 8 else img
+    elif side == 2:
+        out = img[:, want:, ...] if w - want >= 8 else img
+    else:
+        out = img[:, : w - want, ...] if w - want >= 8 else img
+    return np.ascontiguousarray(out)
+
+
+def _blur_rgba_premultiplied(layer, sigma, gain=1.0):
+    arr = np.asarray(layer, dtype=np.float32)
+    a = arr[:, :, 3:4] / 255.0
+    pm = np.concatenate([arr[:, :, :3] * a, a], axis=2)
+    pm = cv2.GaussianBlur(pm, (0, 0), float(sigma))
+    a2 = pm[:, :, 3:4]
+    rgb = np.where(a2 > 1e-6, pm[:, :, :3] / np.maximum(a2, 1e-6), 0.0)
+    a2 = np.clip(a2 * float(gain), 0.0, 1.0)
+    out = np.concatenate([rgb, a2 * 255.0], axis=2)
+    return Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8))
+
+
+def _sweep_layer(layer, dx, dy):
+    arr = np.asarray(layer)
+    h, w = arr.shape[:2]
+    n = max(abs(int(dx)), abs(int(dy)), 1)
+    out = np.zeros_like(arr)
+    for k in range(0, n + 1):
+        sx, sy = int(round(dx * k / n)), int(round(dy * k / n))
+        ys0, ys1 = max(0, sy), min(h, h + sy)
+        xs0, xs1 = max(0, sx), min(w, w + sx)
+        if ys1 <= ys0 or xs1 <= xs0:
+            continue
+        dst = out[ys0:ys1, xs0:xs1]
+        np.maximum(dst, arr[ys0 - sy : ys1 - sy, xs0 - sx : xs1 - sx], out=dst)
+    return Image.fromarray(out)
+
+
+def _scale_layer_alpha(layer, factor):
+    arr = np.array(layer)
+    arr[:, :, 3] = np.clip(arr[:, :, 3].astype(np.float32) * float(factor), 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def _smooth_field(h, w, grid=4):
+    coarse = np.random.uniform(-1.0, 1.0, (grid, grid)).astype(np.float32)
+    return np.clip(cv2.resize(coarse, (w, h), interpolation=cv2.INTER_CUBIC), -1.0, 1.0)
+
+
+def _ink_realism(layer):
+    arr = np.array(layer)
+    alpha = arr[:, :, 3].astype(np.float32)
+    ink = alpha > 8
+    if not ink.any():
+        return layer
+    h, w = alpha.shape
+    if np.random.rand() < INK_DENSITY_PROB:
+        depth = float(np.random.uniform(*INK_DENSITY_DEPTH))
+        field = (_smooth_field(h, w, grid=int(np.random.randint(3, 7))) + 1.0) * 0.5
+        alpha = np.where(ink, alpha * (1.0 - depth * field), alpha)
+    if np.random.rand() < INK_EDGE_PROB:
+        edge = ink & (alpha < 247)
+        sigma = float(np.random.uniform(*INK_EDGE_SIGMA))
+        alpha = np.where(edge, alpha + np.random.normal(0.0, sigma, (h, w)).astype(np.float32), alpha)
+    arr[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
+def _scan_model_bgr(img):
+    h, w = img.shape[:2]
+    out = img.astype(np.float32)
+    if np.random.rand() < SCAN_ILLUM_PROB:
+        depth = float(np.random.uniform(*SCAN_ILLUM_DEPTH))
+        field = (_smooth_field(h, w, grid=3) + 1.0) * 0.5
+        out *= (1.0 - depth * field)[..., None]
+    if np.random.rand() < SCAN_SPREAD_PROB:
+        out = cv2.erode(out, np.ones((3, 3), np.uint8))
+    if np.random.rand() < SCAN_DEFOCUS_PROB:
+        out = cv2.GaussianBlur(out, (0, 0), float(np.random.uniform(*SCAN_DEFOCUS_SIGMA)))
+    if np.random.rand() < SCAN_NOISE_PROB:
+        sigma = float(np.random.uniform(*SCAN_NOISE_SIGMA))
+        out = out + np.random.normal(0.0, sigma, out.shape).astype(np.float32)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _degrade_bgr(img, is_color):
+    out = img
+    if np.random.rand() < DEGRADE_SCALE_PROB:
+        h, w = out.shape[:2]
+        s = float(np.random.uniform(0.4, 0.8))
+        nh, nw = max(8, int(h * s)), max(8, int(w * s))
+        small = cv2.resize(out, (nw, nh), interpolation=cv2.INTER_AREA)
+        out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+    r = np.random.rand()
+    if r < DEGRADE_BLUR_PROB * 0.6:
+        out = cv2.GaussianBlur(out, (3, 3), 0)
+    elif r < DEGRADE_BLUR_PROB:
+        k = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
+        amt = float(np.random.uniform(0.2, 0.6))
+        sharp = cv2.filter2D(out, -1, k)
+        out = np.clip(out.astype(np.float32) * (1 - amt) + sharp.astype(np.float32) * amt, 0, 255).astype(np.uint8)
+    elif np.random.rand() < DEGRADE_SHARPEN_PROB:
+        pass
+    if is_color and np.random.rand() < DEGRADE_COLOR_JITTER_PROB:
+        hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] *= float(np.random.uniform(0.4, 1.6))
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * float(np.random.uniform(0.85, 1.15)), 0, 255)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+        out = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    elif not is_color and np.random.rand() < 0.4:
+        gain = float(np.random.uniform(0.85, 1.15))
+        bias = float(np.random.uniform(-12, 12))
+        out = np.clip(out.astype(np.float32) * gain + bias, 0, 255).astype(np.uint8)
+    if np.random.rand() < DEGRADE_JPEG_PROB:
+        q = int(np.random.randint(25, 71))
+        ok, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+        if ok:
+            out = cv2.imdecode(enc, cv2.IMREAD_UNCHANGED)
+    if np.random.rand() < DEGRADE_PHOTO_PROB:
+        h, w = out.shape[:2]
+        ang = float(np.random.uniform(-3.0, 3.0))
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), ang, 1.0)
+        out = cv2.warpAffine(out, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return out
+
+
 class Renderer:
     """Pillow-based renderer. Drop-in replacement for the old browser one."""
 
-    def __init__(self, background_df=None):
+    def __init__(self, background_df=None, kana_bank=None, real_kana=False, real_kana_prob=None):
         self.background_df = background_df if background_df is not None else get_default_background_df()
+        self.kana_bank = kana_bank
+        self.real_kana = bool(real_kana)
+        self.real_kana_prob = real_kana_prob
         self.max_size = 600
 
     def render(self, lines, override_css_params=None):
+        global _RENDER_COUNT
+        _RENDER_COUNT += 1
+        if _RENDER_COUNT % 250 == 0:
+            with _FONT_CACHE_LOCK:
+                _FONT_CACHE.clear()
+            _trim_native_memory()
+
         img, params = self.render_text(lines, override_css_params)
-        # SFX sits directly on art: never draw a dialogue bubble around it.
         draw_bubble = None if not params.get("sfx") else False
-        img = self.render_background(img, draw_bubble=draw_bubble, tight=bool(params.get("sfx")))
-        # Native scan-like sizes: small crops stay small (never upscaled),
-        # only oversized ones are shrunk to the ceiling. Any size and any
-        # aspect ratio may come out, which is what variable-resolution
-        # (NaFlex-style) training wants.
+        img, ink_box = self.render_background(
+            img, draw_bubble=draw_bubble, tight=bool(params.get("sfx")), return_ink_box=True
+        )
+        if np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
+            bite = TRUNC_INK_BITE_EM * float(params.get("font_size", 48))
+            img = _truncate_bgr(img, ink_box=ink_box, bite_px=bite)
+        if np.random.rand() < FG_OCCLUDE_PROB:
+            img = _draw_foreground_occluders_bgr(img, density=float(np.random.uniform(0.7, 1.4)))
         if max(img.shape[:2]) > self.max_size:
             img = A.LongestMaxSize(self.max_size)(image=img)["image"]
-        if _params_are_color(params):
-            # Coloured ink: keep the 3-channel BGR image so the hue survives.
-            # Black/white samples stay grayscale, exactly as before.
+        is_color = _params_are_color(params)
+        img = _scan_model_bgr(img)
+        img = _degrade_bgr(img, is_color)
+        if is_color:
             return img, params
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if img.ndim == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return img, params
 
     def render_text(self, lines, override_css_params=None):
         """Render text on a transparent background and return as BGRA image."""
-
         sfx_hint = bool((override_css_params or {}).get("sfx", False))
-        params = self.get_random_css_params(sfx=sfx_hint)
+        lang_hint = str((override_css_params or {}).get("lang", "ja"))
+        params = self.get_random_css_params(sfx=sfx_hint, lang=lang_hint)
         if override_css_params:
             params.update(override_css_params)
-            # An explicit single colour wins over sampled mixing: drop the
-            # stale colour list so a pinned black/white override can't leave
-            # a chromatic text_colors behind (which would flip the output to
-            # colour while rendering gray ink).
+            params["lang"] = str(params.get("lang", lang_hint))
             if (
                 "text_color" in override_css_params
                 and "color_mode" not in override_css_params
@@ -601,8 +911,6 @@ class Renderer:
                 params["color_mode"] = "solid"
             if params.get("color_mode", "solid") == "solid":
                 params.pop("text_colors", None)
-        # Guarantee a contrasting outline even for hand-picked colours
-        # (e.g. yellow fill with a white stroke becomes a black stroke).
         _ensure_legible_outline(params)
 
         sfx = bool(params.get("sfx", False))
@@ -622,7 +930,7 @@ class Renderer:
         bg_rgba = _normalize_color(params.get("background_color", "transparent"), "transparent")
 
         irregular = bool(params.get("irregular", False)) and not sfx
-        pad = max(stroke_size, shadow_size, 0) + MIN_PAD
+        pad = max(stroke_size, 3 * shadow_size, 2 if params.get("hollow") else 0, 0) + MIN_PAD
 
         parsed = [_parse_line(line) for line in lines]
         _assert_no_tofu(parsed, font_path)
@@ -690,8 +998,6 @@ class Renderer:
 
         base = Image.new("RGBA", (width, height), bg_rgba)
         if sfx:
-            # Non-text decor behind the ink: speedlines and/or burst balloon.
-            # Never part of the GT (only font glyphs are labeled).
             decor = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             if bool(params.get("sfx_speedlines", False)):
                 if str(params.get("sfx_speedline_style", "radial")) == "parallel":
@@ -707,11 +1013,10 @@ class Renderer:
                 decor = Image.alpha_composite(decor, _draw_burst_layer(width, height, ops))
             base = Image.alpha_composite(base, decor)
 
-        # Per-op ink colours for mixed-colour lettering. Solid mode paints
-        # every glyph with text_color; per_line/per_char vary it (see
-        # _assign_op_colors). Shadow keeps its own single colour, so it is
-        # rendered before assignment kicks in for the text layers.
         main_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        _assign_op_colors(ops, params)
+        kana_bank = self._attach_real_kana(ops, params, sfx=sfx, irregular=irregular)
+        faint_k = float(params.get("faint_alpha", 0.65)) if bool(params.get("faint", False)) else 1.0
         if shadow_size > 0:
             shadow_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             self._execute_ops(
@@ -719,22 +1024,54 @@ class Renderer:
                 ops,
                 vertical=vertical,
                 fill=shadow_rgba,
-                stroke_width=0,
+                stroke_width=stroke_size,
                 stroke_fill=None,
                 font_path=font_path,
                 font_size=font_size,
                 use_op_fill=False,
+                lang=str(params.get("lang", "ja")),
+                kana_bank=kana_bank,
             )
-            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=shadow_size))
+            shadow_layer = _blur_rgba_premultiplied(shadow_layer, shadow_size, gain=SHADOW_GLOW_GAIN)
+            if faint_k < 1.0:
+                shadow_layer = _scale_layer_alpha(shadow_layer, faint_k)
             base = Image.alpha_composite(base, shadow_layer)
 
-        _assign_op_colors(ops, params)
+        hollow = bool(params.get("hollow", False))
+        if hollow and stroke_size <= 0:
+            stroke_size = 2
+        ink_texture = str(params.get("ink_texture", "solid"))
+
+        extrude_layer = None
+        if bool(params.get("extrude", False)):
+            ref_fill = ops[0].get("fill", text_rgba) if ops else text_rgba
+            ext_rgb = (0, 0, 0) if _relative_luminance(ref_fill) > 0.12 else (110, 110, 110)
+            ext_fill = (*ext_rgb, 255)
+            extrude_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            extrude_ops = [{**op, "fill": ext_fill, "stroke": ext_fill} for op in ops]
+            self._execute_ops(
+                extrude_layer,
+                extrude_ops,
+                vertical=vertical,
+                fill=ext_fill,
+                stroke_width=stroke_size,
+                stroke_fill=ext_fill,
+                font_path=font_path,
+                font_size=font_size,
+                use_op_fill=True,
+                lang=str(params.get("lang", "ja")),
+                kana_bank=kana_bank,
+            )
+            mag = int(np.clip(round(font_size * float(np.random.uniform(0.05, 0.11))), 2, 9))
+            dx = mag * int(np.random.choice([-1, 1]))
+            dy = mag * int(np.random.choice([-1, 1]))
+            extrude_layer = _sweep_layer(extrude_layer, dx, dy)
+            if faint_k < 1.0:
+                extrude_layer = _scale_layer_alpha(extrude_layer, faint_k)
+            base = Image.alpha_composite(base, extrude_layer)
 
         outer_layer = None
         if sfx and bool(params.get("sfx_double_outline", False)) and stroke_size > 0:
-            # Classic SFX edge: thick black outer + contrasting inner around the
-            # (possibly coloured) fill. The outer ring stays black for every
-            # glyph; the inner ring adapts per glyph (see _assign_op_colors).
             outer_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             self._execute_ops(
                 outer_layer,
@@ -747,38 +1084,67 @@ class Renderer:
                 font_size=font_size,
                 use_op_fill=True,
                 edge_override=(0, 0, 0, 255),
+                lang=str(params.get("lang", "ja")),
+                kana_bank=kana_bank,
             )
+            if faint_k < 1.0:
+                outer_layer = _scale_layer_alpha(outer_layer, faint_k)
             base = Image.alpha_composite(base, outer_layer)
 
-        self._execute_ops(
-            main_layer,
-            ops,
-            vertical=vertical,
-            fill=text_rgba,
-            stroke_width=stroke_size,
-            stroke_fill=stroke_rgba if stroke_size > 0 else None,
-            font_path=font_path,
-            font_size=font_size,
-            use_op_fill=True,
-        )
+        if hollow:
+            hollow_ops = [{**op, "fill": (0, 0, 0, 0)} for op in ops]
+            self._execute_ops(
+                main_layer,
+                hollow_ops,
+                vertical=vertical,
+                fill=(0, 0, 0, 0),
+                stroke_width=max(2, stroke_size),
+                stroke_fill=stroke_rgba,
+                font_path=font_path,
+                font_size=font_size,
+                use_op_fill=True,
+                lang=str(params.get("lang", "ja")),
+                kana_bank=kana_bank,
+            )
+        else:
+            self._execute_ops(
+                main_layer,
+                ops,
+                vertical=vertical,
+                fill=text_rgba,
+                stroke_width=stroke_size,
+                stroke_fill=stroke_rgba if stroke_size > 0 else None,
+                font_path=font_path,
+                font_size=font_size,
+                use_op_fill=True,
+                lang=str(params.get("lang", "ja")),
+                kana_bank=kana_bank,
+            )
+        if ink_texture in ("gradient", "stripe"):
+            main_layer = _apply_ink_modulation(main_layer, ink_texture)
+        if bool(params.get("distress", False)):
+            main_layer = _distress_rgba(main_layer, strength=float(params.get("distress_strength", 0.5)))
+        main_layer = _ink_realism(main_layer)
+        if bool(params.get("faint", False)):
+            arr = np.array(main_layer)
+            arr[:, :, 3] = (arr[:, :, 3].astype(np.float32) * faint_k).astype(np.uint8)
+            main_layer = Image.fromarray(arr)
         base = Image.alpha_composite(base, main_layer)
 
-        # SFX: remember where the *lettering* is (fill + stroke + outer outline,
-        # no speedlines / burst / shadow) so the final crop can hug it.
         ink = None
         if sfx:
             ink_alpha = main_layer.getchannel("A")
             if outer_layer is not None:
                 ink_alpha = ImageChops.lighter(ink_alpha, outer_layer.getchannel("A"))
+            if extrude_layer is not None:
+                ink_alpha = ImageChops.lighter(ink_alpha, extrude_layer.getchannel("A"))
             ink = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             ink.putalpha(ink_alpha)
 
         if sfx:
             block_rotate = float(params.get("sfx_block_rotate", 0.0))
             if block_rotate:
-                base = base.rotate(
-                    block_rotate, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0)
-                )
+                base = base.rotate(block_rotate, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0))
                 ink = ink.rotate(block_rotate, resample=Image.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0))
 
         slant = float(params.get("slant", 0.0))
@@ -788,15 +1154,60 @@ class Renderer:
                 ink = _shear_layer(ink, slant)
 
         if ink is not None:
-            # Clip everything (decor included) to the ink bounding box.
             a = ink.getchannel("A").point(lambda v: 255 if v > SFX_INK_ALPHA_THRESHOLD else 0)
             bbox = a.getbbox()
             if bbox is not None:
                 base = base.crop(bbox)
 
         img = np.array(base)
-        img = img[:, :, [2, 1, 0, 3]]  # RGBA -> BGRA (BGR channel order like cv2)
+        img = img[:, :, [2, 1, 0, 3]]  # RGBA -> BGRA
         return np.ascontiguousarray(img), params
+
+    def _attach_real_kana(self, ops, params, *, sfx=False, irregular=False):
+        """Attach real-kana glyphs to eligible ops; return the bank or None.
+
+        Opt-in only: enabled with ``real_kana=True`` on the renderer or in the
+        per-sample params.  Disabled for non-Japanese text.  SFX keeps the
+        decorative fonts unless ``real_kana_sfx`` is set explicitly.
+        """
+
+        if sfx and not bool(params.get("real_kana_sfx", False)):
+            return None
+        if str(params.get("lang", "ja")).lower() not in {"ja", "japanese", "jp"}:
+            return None
+        enabled = params.get("real_kana", None)
+        if enabled is None:
+            enabled = getattr(self, "real_kana", False)
+        if not enabled:
+            return None
+        bank = getattr(self, "kana_bank", None)
+        if isinstance(bank, (str, os.PathLike)):
+            bank = _get_real_kana_bank(bank)
+        if bank is None:
+            bank = _get_real_kana_bank(params.get("kana_bank_root"))
+        if bank is None or len(bank) == 0:
+            return None
+        cfg = getattr(bank, "cfg", None)
+        try:
+            from manga_ocr_dev.real_kana.bank import attach_real_kana
+
+            default_prob = getattr(self, "real_kana_prob", None)
+            if default_prob is None:
+                default_prob = getattr(cfg, "real_kana_prob", REAL_KANA_PROB)
+            prob = params.get("real_kana_prob", default_prob)
+            seed = params.get("real_kana_seed", None)
+            rng = np.random.default_rng(int(seed) if seed is not None else None)
+            stats = attach_real_kana(ops, bank, cfg=cfg, rng=rng, probability=float(prob), lang="ja")
+            params["real_kana_stats"] = {
+                "attached": stats["attached"],
+                "skipped": stats["skipped"],
+                "probability": float(prob),
+            }
+        except Exception as exc:  # noqa: BLE001
+            # A missing/broken bank must never break normal rendering.
+            log.warning("real-kana rendering failed, using fonts: %s", exc)
+            return None
+        return bank
 
     @staticmethod
     def _layout_uniform(
@@ -812,14 +1223,6 @@ class Renderer:
         margin,
         pad,
     ):
-        """Uniform grid layout: every line shares one font size and one origin.
-
-        Each op is a dict:
-          {"kind": "char", "ch", "cx", "cy", "font", "rotate", "ttb", "line"}
-          {"kind": "tcy", "text", "cx", "cy", "line"}
-        Coordinates are cell centers in canvas pixels. ``line`` is the
-        zero-based line index used for per-line multicolour lettering.
-        """
         pitch_base = round(font_size * (1.0 + line_height))
         ops = []
 
@@ -841,10 +1244,7 @@ class Renderer:
                 has_ruby.append(ruby)
             inner_h = max(counts, default=0) * font_size
             height = max(1, inner_h + 2 * margin + 2 * pad)
-            pitches = [
-                max(pitch_base, font_size + (ruby_size + RUBY_GAP if r else 0) + RUBY_GAP)
-                for r in has_ruby
-            ]
+            pitches = [max(pitch_base, font_size + (ruby_size + RUBY_GAP if r else 0) + RUBY_GAP) for r in has_ruby]
             width = max(1, sum(pitches) + 2 * margin + 2 * pad)
 
             slot_right = width - margin - pad
@@ -912,10 +1312,7 @@ class Renderer:
                 has_ruby.append(ruby)
             inner_w = max(widths, default=0)
             width = max(1, int(inner_w) + 2 * margin + 2 * pad)
-            pitches = [
-                max(pitch_base, font_size + (ruby_size + RUBY_GAP if r else 0) + RUBY_GAP)
-                for r in has_ruby
-            ]
+            pitches = [max(pitch_base, font_size + (ruby_size + RUBY_GAP if r else 0) + RUBY_GAP) for r in has_ruby]
             height = max(1, sum(pitches) + 2 * margin + 2 * pad)
 
             x_left = margin + pad
@@ -976,8 +1373,6 @@ class Renderer:
                             )
                             rx += adv
                     elif tok[0] == "tcy":
-                        # text-combine-upright only applies to vertical text;
-                        # in horizontal mode render the characters normally.
                         for ch in _strip_tags(tok[1]):
                             adv = _advance(font, ch, letter_spacing_px)
                             ops.append(
@@ -1019,20 +1414,6 @@ class Renderer:
         rotate=ROTATE_DEG,
         small_kana=True,
     ):
-        """Challenging hand-lettered layout: per-line sizes and start offsets.
-
-        Each line (column for vertical text, row for horizontal text) is
-        typeset at its own font size and starts at its own offset along the
-        reading direction, so columns/rows differ in glyph size and are
-        staggered instead of grid-aligned. Optionally, characters within a
-        line vary in size (emphasis lettering), wobble perpendicular to the
-        baseline, tilt slightly, and small kana render shrunken.
-
-        Ops carry per-glyph ``font``/``cell``/``angle`` keys understood by
-        ``_execute_ops``. Ruby bases stay uniform within their line (scaled by
-        the line size) so furigana remains legible; tcy runs are squeezed into
-        a single cell of the line size.
-        """
         n_lines = len(parsed)
         line_scales = [float(np.random.uniform(line_scale_min, line_scale_max)) for _ in range(n_lines)]
         line_fs = [max(MIN_CHAR_SIZE, round(font_size * s)) for s in line_scales]
@@ -1045,7 +1426,6 @@ class Renderer:
             return _get_font(font_path, max(MIN_CHAR_SIZE, int(size)))
 
         def char_spec(ch, fs, jitter_on):
-            """Per-glyph size/tilt/wobble for one base character."""
             scale = 1.0
             if small_kana and ch in SMALL_KANA:
                 scale *= float(np.random.uniform(*SMALL_KANA_SCALE))
@@ -1056,11 +1436,6 @@ class Renderer:
             cross = float(np.random.uniform(-wobble, wobble)) * fs if wobble else 0.0
             return scaled_font(size), size, angle, cross
 
-        # Pass 1: per-line metrics and per-glyph specs (needed for canvas size).
-        # Segments are ("chars", [(ch, font, cell, adv, angle, cross)], seg_len),
-        # ("ruby", base, rt, [base_adv], seg_len, rt_len) or
-        # ("tcy", text, adv, angle, cross). Ruby bases stay uniform at the line
-        # size so furigana remains legible.
         pitches = []
         ruby_sizes = []
         segments_per_line = []
@@ -1254,8 +1629,6 @@ class Renderer:
                             )
                             rx += adv
                     elif seg[0] == "tcy":
-                        # text-combine-upright only applies to vertical text;
-                        # in horizontal mode render the characters normally.
                         _, text, _adv, angle, cross = seg
                         for ch in text:
                             adv = _advance(base_font, ch, 0)
@@ -1302,15 +1675,6 @@ class Renderer:
         small_kana=True,
         aspect=0.0,
     ):
-        """SFX layout: huge glyphs on a curved baseline with per-glyph perspective.
-
-        Each glyph gets its own size, tilt (plus curve-tangent rotation),
-        baseline wobble and perspective strength. Ruby is flattened (base text
-        only) since SFX never carries furigana; ``♡♥★`` survive only as normal
-        font glyphs. Ops carry a ``persp`` key understood by ``_execute_ops``.
-        Positions are built in local coords then shifted to fit the canvas, so
-        wild curves/rotations never clip.
-        """
         n_lines = max(1, len(parsed))
         line_scales = [float(np.random.uniform(*SFX_LINE_SCALE_RANGE)) for _ in range(n_lines)]
         line_fs = [max(MIN_CHAR_SIZE, round(font_size * s)) for s in line_scales]
@@ -1331,25 +1695,16 @@ class Renderer:
         def char_spec(ch, fs, prev_scale, cap_ref, cap_mult):
             scale = float(np.random.uniform(char_scale_min, char_scale_max))
             if prev_scale is not None:
-                # Neighbours may differ in size, but not so much that the small
-                # one is swallowed by the big one's outline (unreadable = wrong label).
                 scale = float(np.clip(scale, prev_scale / SFX_ADJACENT_SCALE_MAX, prev_scale * SFX_ADJACENT_SCALE_MAX))
             base_scale = scale
             is_small = bool(small_kana and ch in SMALL_KANA)
             if is_small:
                 scale *= float(np.random.uniform(*SMALL_KANA_SCALE))
                 if cap_ref is not None:
-                    # ォ/オ, ッ/ツ, ャ/ヤ ... differ mainly by size: stay clearly smaller
-                    # than the glyph before (or no larger than a small kana before it),
-                    # otherwise the label is ambiguous.
                     scale = min(scale, cap_ref * cap_mult)
             else:
-                # Consume the same RNG draws so seeds stay comparable when
-                # small_kana is toggled.
                 np.random.uniform(*SMALL_KANA_SCALE)
             size = max(MIN_CHAR_SIZE, round(fs * scale))
-            # Always consume RNG (even when the magnitude is 0) so identical
-            # seeds give identical layouts apart from the varied parameter.
             angle = float(np.random.uniform(-1.0, 1.0)) * rot_max
             cross = float(np.random.uniform(-1.0, 1.0)) * wob_em * fs
             p = float(np.random.uniform(0.0, 1.0)) * persp_max
@@ -1360,9 +1715,7 @@ class Renderer:
         def flat_chars(tokens):
             out = []
             for tok in tokens:
-                if tok[0] in ("text", "tcy"):
-                    out.extend(list(_strip_tags(tok[1])))
-                elif tok[0] == "ruby":
+                if tok[0] in ("text", "tcy") or tok[0] == "ruby":
                     out.extend(list(_strip_tags(tok[1])))
             return out
 
@@ -1379,15 +1732,17 @@ class Renderer:
             if mode == "bounce":
                 return sign * amp_em * abs(math.sin(math.pi * freq_zz * t)) * 1.2 - sign * amp_em * 0.6
             if mode == "hill":
-                # asymmetric: rises slowly, drops fast (like a thrown punch)
-                return sign * amp_em * (math.sin(math.pi * min(1.0, t ** 0.6)) * 1.1 - 0.4)
+                return sign * amp_em * (math.sin(math.pi * min(1.0, t**0.6)) * 1.1 - 0.4)
+            if mode == "steep":
+                return sign * amp_em * 2.2 * (t - 0.5)
+            if mode == "circle":
+                return sign * amp_em * (math.cos(math.pi * (t - 0.5) * 1.6) * 1.4 - 0.5)
             return 0.0
 
         def curve_slope(t):
             e = 1e-3
             return (curve_offset(min(1.0, t + e)) - curve_offset(max(0.0, t - e))) / (2.0 * e)
 
-        # Pass 1: per-glyph specs and line totals.
         specs_per_line = []
         totals = []
         pitches = []
@@ -1403,16 +1758,10 @@ class Renderer:
                 font, cell, angle, cross, p, asp, prev_scale, final_scale, was_small = char_spec(
                     ch, fs, prev_scale, cap_ref, cap_mult
                 )
-                # size chain uses the unshrunk scale (so a small kana doesn't shrink the
-                # whole word); the small-kana cap uses what was actually drawn.
                 cap_ref, cap_mult = (final_scale, 1.0) if was_small else (final_scale, SMALL_KANA_SCALE[1])
                 adv = (cell + sp) if vertical else _advance(font, ch, sp)
-                # A tilted / perspective-warped glyph occupies more than its em
-                # box; give it most of that growth as extra pitch so neighbours
-                # overlap only slightly (touching is still allowed, burying is not).
                 rad = math.radians(angle)
                 adv = adv * (1.0 + 0.8 * (abs(math.cos(rad)) + abs(math.sin(rad)) - 1.0) + 0.6 * p)
-                # keep the layout pitch honest when a glyph is stretched
                 adv = adv * (asp[1] if vertical else asp[0]) if aspect_max else adv
                 specs.append([ch, font, cell, adv, angle, cross, p, asp])
                 total += adv
@@ -1420,7 +1769,6 @@ class Renderer:
             totals.append(total)
             pitches.append(round(fs * (1.0 + line_height)) + RUBY_GAP)
 
-        # Pass 2: positions in local coords (origin at 0,0).
         ops = []
         line_origins = []
         acc = 0
@@ -1428,8 +1776,6 @@ class Renderer:
             line_origins.append(acc)
             acc += pitch
         if vertical:
-            # vertical-rl: the first line is the RIGHTMOST column. Mirror the
-            # slot origins so the GT ("\n"-joined lines) matches reading order.
             line_origins = [acc - o - p for o, p in zip(line_origins, pitches)]
         for li, (fs, sp, specs) in enumerate(specs_per_line):
             total = totals[li] or 1
@@ -1439,7 +1785,6 @@ class Renderer:
                 off_px = curve_offset(t) * fs
                 slope = curve_slope(t)
                 tangent_deg = math.degrees(math.atan(slope * fs / max(total, 1)))
-                # For vertical text the reading axis is y; transpose the offset.
                 if vertical:
                     cx = line_origins[li] + fs / 2 + off_px + cross
                     cy = pos + adv / 2
@@ -1462,10 +1807,6 @@ class Renderer:
                         "cell": cell,
                         "angle": final_angle,
                         "persp": p,
-                        # Unit warp coefficients, drawn ONCE per glyph. Every render pass
-                        # (black outer edge, coloured fill, shadow) must reuse the same
-                        # warp, otherwise the outline is warped differently from the
-                        # glyph and shows up as an offset "ghost" copy of it.
                         "pcoef": tuple(float(v) for v in np.random.uniform(-1.0, 1.0, 8)),
                         "aspect": asp,
                         "rotate": rot_flag,
@@ -1481,7 +1822,7 @@ class Renderer:
             return width, height, ops
 
         max_cell = max(op.get("cell", font_size) for op in ops)
-        extra = int(math.ceil(max_cell * 0.9 + amp_em * max(line_fs)))
+        extra = math.ceil(max_cell * 0.9 + amp_em * max(line_fs))
         xs = [op["cx"] for op in ops]
         ys = [op["cy"] for op in ops]
         xmin, xmax = min(xs) - max_cell, max(xs) + max_cell
@@ -1497,13 +1838,25 @@ class Renderer:
 
     @staticmethod
     def _execute_ops(
-        layer, ops, vertical, fill, stroke_width, stroke_fill, font_path, font_size,
-        use_op_fill=True, edge_override=None,
+        layer,
+        ops,
+        vertical,
+        fill,
+        stroke_width,
+        stroke_fill,
+        font_path,
+        font_size,
+        use_op_fill=True,
+        edge_override=None,
+        lang="ja",
+        kana_bank=None,
     ):
+        from manga_ocr_dev.synthetic_data_generator.lang import TTB_LANGUAGE
+
+        ttb_lang = TTB_LANGUAGE.get(str(lang), "ja")
         draw = ImageDraw.Draw(layer)
         if any("persp" in op for op in ops):
-            # SFX: paint big glyphs first so small ones (and their outlines) stay on top.
-            ops = sorted(ops, key=lambda o: -float(o.get("cell", 0) or 0))
+            ops = sorted(ops, key=lambda o: -float(o.get("cell") or 0))
         for op in ops:
             angle = float(op.get("angle", 0) or 0)
             persp = float(op.get("persp", 0) or 0)
@@ -1511,10 +1864,21 @@ class Renderer:
                 op_fill = op.get("fill", fill)
                 op_edge = edge_override if edge_override is not None else op.get("stroke", stroke_fill)
             else:
-                # Shadow/glow pass: each glyph glows in its own shadow tone
-                # (black for light fills, sampled glow otherwise).
                 op_fill = op.get("shadow", fill)
-                op_edge = None
+                op_edge = op_fill
+            if kana_bank is not None and op.get("kana"):
+                from manga_ocr_dev.real_kana.bank import draw_bank_op
+
+                if draw_bank_op(
+                    layer,
+                    op,
+                    kana_bank,
+                    fill=op_fill,
+                    stroke_width=stroke_width,
+                    stroke_fill=op_edge,
+                    angle=angle,
+                ):
+                    continue
             if op["kind"] == "tcy":
                 _draw_tcy_tile(
                     layer,
@@ -1522,7 +1886,7 @@ class Renderer:
                     op["cx"],
                     op["cy"],
                     font_path=font_path,
-                    font_size=op.get("cell", font_size),
+                    font_size=op.get("cell") or font_size,
                     fill=op_fill,
                     stroke_width=stroke_width,
                     stroke_fill=op_edge,
@@ -1535,7 +1899,7 @@ class Renderer:
                     op["cx"],
                     op["cy"],
                     font=op["font"],
-                    cell=op.get("cell", font_size),
+                    cell=op.get("cell") or font_size,
                     angle=angle,
                     persp=persp,
                     fill=op_fill,
@@ -1543,6 +1907,7 @@ class Renderer:
                     stroke_fill=op_edge,
                     rotate_mixed=bool(op.get("rotate", False)),
                     ttb=bool(op.get("ttb", False)),
+                    lang=ttb_lang,
                     aspect=op.get("aspect"),
                     pcoef=op.get("pcoef"),
                 )
@@ -1553,7 +1918,7 @@ class Renderer:
                     op["cx"],
                     op["cy"],
                     font=op["font"],
-                    cell=op.get("cell", font_size),
+                    cell=op.get("cell") or font_size,
                     fill=op_fill,
                     stroke_width=stroke_width,
                     stroke_fill=op_edge,
@@ -1566,7 +1931,7 @@ class Renderer:
                     op["cx"],
                     op["cy"],
                     font=op["font"],
-                    cell=op.get("cell", font_size),
+                    cell=op.get("cell") or font_size,
                     angle=angle,
                     fill=op_fill,
                     stroke_width=stroke_width,
@@ -1575,72 +1940,99 @@ class Renderer:
             else:
                 kw = {"font": op["font"], "fill": op_fill, "anchor": "mm"}
                 if op.get("ttb"):
-                    kw.update(direction="ttb", language="ja")
+                    kw.update(direction="ttb", language=ttb_lang)
                 if stroke_width:
                     kw.update(stroke_width=stroke_width, stroke_fill=op_edge)
                 draw.text((op["cx"], op["cy"]), op["ch"], **kw)
 
     @staticmethod
-    def get_random_sfx_params():
-        """Sample SFX lettering params (separate dataset split, not dialogue)."""
+    def get_random_sfx_params(lang="ja"):
+        from manga_ocr_dev.synthetic_data_generator.lang import SFX_VERTICAL_PROB, normalize_lang
+
+        lang = normalize_lang(lang)
         font_size = int(np.random.uniform(*SFX_FONT_SIZE_RANGE))
         text_color = _sample_text_color(sfx=True)
+        if np.random.rand() < 0.2:
+            stroke_choice = int(np.random.choice([0, 1, 2]))
+        else:
+            stroke_choice = int(np.random.choice([2, 3, 4, 5, 6, 7]))
+        stroke_size = min(stroke_choice, max(2 if stroke_choice >= 2 else 0, round(SFX_STROKE_FRAC * font_size) + 2))
+        if font_size < 55:
+            stroke_size = min(stroke_size, 3)
         params = {
             "sfx": True,
+            "lang": lang,
             "font_size": font_size,
-            "vertical": True if np.random.rand() < SFX_VERTICAL_PROB else False,
-            "line_height": 0.3,
+            "vertical": bool(np.random.rand() < SFX_VERTICAL_PROB.get(lang, 0.4)),
+            "line_height": float(np.random.uniform(0.18, 0.42)),
             "background_color": "transparent",
             "text_color": text_color,
             "color_mode": "solid",
             "irregular": False,
-            # Cap the edge relative to the glyph size: a 10-14 px double outline on a
-            # ~70 px thin hiragana fills its counters and the glyph turns into a blob.
-            "stroke_size": min(int(np.random.choice([2, 3, 4, 5, 6])), max(2, round(SFX_STROKE_FRAC * font_size))),
+            "stroke_size": stroke_size,
             "stroke_color": "white",
             "sfx_curve": str(np.random.choice(SFX_CURVE_MODES, p=SFX_CURVE_P)),
-            "sfx_aspect": float(np.random.uniform(0.0, SFX_ASPECT_MAX)) if np.random.rand() < 0.6 else 0.0,
+            "sfx_aspect": float(np.random.uniform(0.0, SFX_ASPECT_MAX)) if np.random.rand() < 0.65 else 0.0,
             "sfx_speedline_style": str(np.random.choice(["radial", "parallel"], p=[0.6, 0.4])),
             "letter_spacing": float(np.random.uniform(*SFX_SPACING_RANGE)),
             "sfx_curve_amp": float(np.random.uniform(*SFX_CURVE_AMP_RANGE)),
             "sfx_curve_sign": float(np.random.choice([-1.0, 1.0])),
             "sfx_persp": float(np.random.uniform(*SFX_PERSP_RANGE)),
-            "sfx_rotate": float(np.random.uniform(8.0, SFX_ROTATE_DEG)),
+            "sfx_rotate": float(np.random.uniform(6.0, SFX_ROTATE_DEG)),
             "sfx_char_scale_min": float(SFX_CHAR_SCALE_RANGE[0]),
-            "sfx_char_scale_max": float(np.random.uniform(1.4, SFX_CHAR_SCALE_RANGE[1])),
-            "sfx_wobble": 0.05,
+            "sfx_char_scale_max": float(np.random.uniform(1.5, SFX_CHAR_SCALE_RANGE[1])),
+            "sfx_wobble": float(np.random.uniform(0.03, 0.12)),
             "sfx_speedlines": bool(np.random.rand() < SFX_SPEEDLINE_PROB),
             "sfx_speedline_n": int(np.random.randint(*SFX_SPEEDLINE_N_RANGE)),
             "sfx_burst": bool(np.random.rand() < SFX_BURST_PROB),
             "sfx_double_outline": bool(np.random.rand() < SFX_DOUBLE_OUTLINE_PROB),
-            "sfx_block_rotate": (
-                float(np.random.uniform(*SFX_BLOCK_ROTATE_RANGE)) if np.random.rand() < 0.5 else 0.0
-            ),
+            "sfx_block_rotate": (float(np.random.uniform(*SFX_BLOCK_ROTATE_RANGE)) if np.random.rand() < 0.55 else 0.0),
         }
+        if np.random.rand() < SFX_BLOCK_ROTATE_90_PROB:
+            params["sfx_block_rotate"] = float(np.random.uniform(80, 100) * np.random.choice([-1.0, 1.0]))
+        if np.random.rand() < HOLLOW_PROB:
+            params["hollow"] = True
+        r = np.random.rand()
+        if r < GRADIENT_FILL_PROB:
+            params["ink_texture"] = "gradient"
+        elif r < GRADIENT_FILL_PROB + STRIPE_FILL_PROB:
+            params["ink_texture"] = "stripe"
+        if np.random.rand() < EXTRUDE_PROB:
+            params["extrude"] = True
+        if np.random.rand() < DISTRESS_PROB:
+            params["distress"] = True
+            params["distress_strength"] = float(np.random.uniform(0.3, 0.9))
+        if np.random.rand() < FAINT_PROB:
+            params["faint"] = True
+            params["faint_alpha"] = float(np.random.uniform(0.45, 0.75))
         if np.random.rand() < 0.7:
             params["text_orientation"] = "upright"
         if text_color == "black" and np.random.rand() < 0.2:
-            # white ink with a heavy black edge (very common SFX look)
             params["text_color"] = "white"
             params["stroke_color"] = "black"
-        if np.random.rand() < 0.08:
+        if np.random.rand() < 0.15:
             params["slant"] = float(np.random.uniform(*SLANT_MILD_RANGE) * np.random.choice([-1.0, 1.0]))
-        if text_color != "black" and np.random.rand() < SFX_MULTICOLOR_PROB:
-            params["color_mode"] = _sample_color_mode(sfx=True)
-            params["text_colors"] = _sample_text_colors(int(np.random.randint(2, 5)), sfx=True)
-            if text_color not in params["text_colors"]:
-                params["text_colors"][0] = text_color
+        _maybe_multicolor(params, text_color, sfx=True)
+        if np.random.rand() < BG_CAMO_PROB:
+            return params
         return _ensure_legible_outline(params)
 
     @staticmethod
-    def get_random_css_params(sfx=False):
+    def get_random_css_params(sfx=False, lang="ja"):
+        from manga_ocr_dev.synthetic_data_generator.lang import (
+            DIALOGUE_VERTICAL_PROB,
+            normalize_lang,
+        )
+
+        lang = normalize_lang(lang)
         if sfx:
-            return Renderer.get_random_sfx_params()
+            return Renderer.get_random_sfx_params(lang=lang)
         text_color = _sample_text_color(sfx=False)
         params = {
-            "font_size": 48,
-            "vertical": True if np.random.rand() < 0.7 else False,
-            "line_height": 0.5,
+            "lang": lang,
+            "font_size": int(np.random.uniform(*DIALOGUE_FONT_SIZE_RANGE)),
+            "vertical": bool(np.random.rand() < DIALOGUE_VERTICAL_PROB.get(lang, 0.7)),
+            "line_height": float(np.random.uniform(*DIALOGUE_LINE_HEIGHT_RANGE)),
             "background_color": "transparent",
             "text_color": text_color,
             "color_mode": "solid",
@@ -1656,18 +2048,12 @@ class Renderer:
             params["stroke_size"] = int(np.random.choice(STROKE_SIZES, p=STROKE_SIZE_P))
             params["stroke_color"] = "white"
         elif stroke_variant == "shadow":
-            # Small glow only: large blurs read as ghost/double characters.
             params["shadow_size"] = np.random.choice([1, 2, 3])
             params["shadow_color"] = "white" if np.random.rand() < 0.8 else "black"
-        elif stroke_variant == "none":
-            pass
 
         if np.random.rand() < IRREGULAR_PROB:
-            # Challenging hand-lettered crops: per-line sizes + staggered line
-            # starts. Half of them stay mild (realscan style), the other half
-            # adds per-character emphasis sizing, wobble, tilt and small kana.
             params["irregular"] = True
-            if np.random.rand() < 0.5:
+            if np.random.rand() < 0.4:
                 params.update(
                     line_scale_min=0.8,
                     line_scale_max=1.25,
@@ -1679,45 +2065,42 @@ class Renderer:
                 )
             else:
                 params.update(
-                    line_scale_min=0.6,
-                    line_scale_max=1.6,
-                    line_shift=1.5,
-                    char_jitter_prob=0.6,
-                    char_scale_min=0.65,
-                    char_scale_max=1.6,
-                    wobble=0.08,
-                    rotate=float(np.random.uniform(2, 7)),
-                    small_kana=True,
+                    line_scale_min=0.55,
+                    line_scale_max=1.65,
+                    line_shift=1.6,
+                    char_jitter_prob=0.65,
+                    char_scale_min=0.6,
+                    char_scale_max=1.65,
+                    wobble=0.10,
+                    rotate=float(np.random.uniform(2, 8)),
+                    small_kana=(lang == "ja"),
                 )
 
         if np.random.rand() < SLANT_PROB:
-            # Slanted emphasis lettering: usually a mild italic-like lean,
-            # occasionally a dramatic skew.
             if np.random.rand() < SLANT_STRONG_PROB:
                 low, high = SLANT_STRONG_RANGE
             else:
                 low, high = SLANT_MILD_RANGE
             params["slant"] = float(np.random.uniform(low, high) * np.random.choice([-1.0, 1.0]))
 
-        if text_color != "black" and np.random.rand() < MULTICOLOR_PROB:
-            # Mixed-colour lettering within one image: each line (emphasis) or
-            # each glyph (rainbow) gets its own colour from the list.
-            params["color_mode"] = _sample_color_mode(sfx=False)
-            params["text_colors"] = _sample_text_colors(int(np.random.randint(2, 5)), sfx=False)
-            if text_color not in params["text_colors"]:
-                params["text_colors"][0] = text_color
+        if np.random.rand() < HOLLOW_PROB * 0.4:
+            params["hollow"] = True
+        if np.random.rand() < DISTRESS_PROB * 0.6:
+            params["distress"] = True
+            params["distress_strength"] = float(np.random.uniform(0.25, 0.6))
+        if np.random.rand() < FAINT_PROB * 0.7:
+            params["faint"] = True
+            params["faint_alpha"] = float(np.random.uniform(0.5, 0.8))
+        if np.random.rand() < EXTRUDE_PROB * 0.4:
+            params["extrude"] = True
 
+        _maybe_multicolor(params, text_color, sfx=False)
+
+        if np.random.rand() < BG_CAMO_PROB * 0.7:
+            return params
         return _ensure_legible_outline(params)
 
-    # ------------------------------------------------------------ backgrounds
     def _load_background(self, h, w):
-        """Random background patch of size (h, w), BGR uint8.
-
-        Picks among the sources whose aspect ratio is closest to the target and
-        cuts a random window of exactly the target aspect, so nothing is
-        stretched (the old ``A.Resize`` squashed arbitrary-ratio crops, which
-        reads as blur) and the same source gives many different patches.
-        """
         df = self.background_df
         lr = getattr(self, "_bg_logratio", None)
         if lr is None or len(lr) != len(df):
@@ -1729,10 +2112,10 @@ class Renderer:
         bg = None
         for _ in range(8):
             row = df.iloc[int(np.random.choice(near))]
-            bg = cv2.imread(row.path)
+            bg = _read_bg_cached(row.path)
             if bg is not None:
                 break
-            near = np.arange(len(df))  # unreadable file: fall back to anything
+            near = np.arange(len(df))
         if bg is None:
             raise FileNotFoundError("no readable background image")
 
@@ -1741,8 +2124,6 @@ class Renderer:
             wh, ww = bh, bh * w / h
         else:
             ww, wh = bw, bw * h / w
-        # Random zoom into the source, but never so far that it must be
-        # upscaled much (upscaling is the other source of blur).
         s_min = min(1.0, max(0.45, 0.6 * max(w / max(ww, 1), h / max(wh, 1))))
         sc = np.random.uniform(s_min, 1.0)
         ww, wh = max(8, int(ww * sc)), max(8, int(wh * sc))
@@ -1764,13 +2145,6 @@ class Renderer:
 
     @staticmethod
     def _ink_edge(img):
-        """(edge_lum, ring_mask) of a BGRA text image.
-
-        ``edge_lum`` is the mean grey level of the outermost opaque ink pixels
-        (what actually touches the background: the outline if there is one,
-        else the fill). ``ring_mask`` marks the background pixels just outside
-        the ink, where legibility is decided. ``edge_lum`` is None without ink.
-        """
         solid = (img[:, :, 3] > 200).astype(np.uint8)
         if not solid.any():
             return None, None
@@ -1785,39 +2159,57 @@ class Renderer:
 
     @staticmethod
     def _low_contrast_frac(bg, edge_lum, ring):
-        """Fraction of ring pixels whose grey level is too close to the ink edge."""
         if edge_lum is None or ring is None or not ring.any():
             return 0.0
         g = bg.astype(np.float32).mean(axis=2)[ring]
         return float((np.abs(g - edge_lum) < BG_MIN_EDGE_DIFF).mean())
 
+    @staticmethod
+    def _ink_mean_bgr(img):
+        try:
+            solid = img[:, :, 3] > 200
+            if not solid.any():
+                return None
+            return img[:, :, :3][solid].mean(axis=0)
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _ink_is_chromatic_bgra(img):
+        mean = Renderer._ink_mean_bgr(img)
+        if mean is None:
+            return False
+        return float(mean.max() - mean.min()) > 25.0
+
     def _make_background(self, bg0, img):
-        """Tone + decorate ``bg0`` until the ink is legible against it."""
         edge_lum, ring = self._ink_edge(img)
         ink_lum = 0.0 if edge_lum is None else edge_lum
+        chromatic_ink = self._ink_is_chromatic_bgra(img)
         for _ in range(BG_MAX_TRIES):
             bg = self._decorate_background(self._adjust_background(bg0, ink_lum))
+            if chromatic_ink and np.random.rand() < BG_COLOR_ART_PROB:
+                ref = self._ink_mean_bgr(img)
+                if ref is not None:
+                    bg = _colorize_background(bg, ref, strength=float(np.random.uniform(0.35, 0.7)))
             if self._low_contrast_frac(bg, edge_lum, ring) <= BG_MAX_LOW_CONTRAST:
                 return bg
-        # Deterministic fallback: push the mean to the far side of the ink.
+        if np.random.rand() < BG_CAMO_PROB:
+            bg = self._decorate_background(self._adjust_background(bg0, ink_lum))
+            if chromatic_ink:
+                ref = self._ink_mean_bgr(img)
+                if ref is not None:
+                    bg = _colorize_background(bg, ref, strength=0.6)
+            return bg
         far = 70.0 if ink_lum >= 128 else 195.0
         f = bg0.astype(np.float32)
         f = (f - f.mean()) * 1.0 + far
         bg = np.clip(f, 0, 255).astype(np.uint8)
         if self._low_contrast_frac(bg, edge_lum, ring) > BG_MAX_LOW_CONTRAST:
-            bg = np.full_like(bg0, int(far))  # last resort: flat but legible
+            bg = np.full_like(bg0, int(far))
         return bg
 
     @staticmethod
     def _adjust_background(bg, ink_lum):
-        """Make a background harder: keep texture, move its brightness off the extremes.
-
-        ``natural`` keeps the source brightness, ``midtone`` moves it to a mid
-        grey, ``ink_match`` moves it close to the ink's own brightness (dark
-        art behind black ink, light art behind white ink), which is the case an
-        OCR model finds hardest. Texture contrast is never reduced - it is
-        lifted to a minimum std - so the background stays busy rather than flat.
-        """
         f = bg.astype(np.float32)
         gray = f.mean(axis=2)
         m, sd = float(gray.mean()), float(gray.std())
@@ -1836,7 +2228,6 @@ class Renderer:
 
     @staticmethod
     def _decorate_background(bg):
-        """Optional screentone / gradient / sensor noise on a background."""
         h, w = bg.shape[:2]
         f = bg.astype(np.float32)
         if np.random.rand() < BG_GRADIENT_PROB:
@@ -1848,13 +2239,14 @@ class Renderer:
         if np.random.rand() < BG_SCREENTONE_PROB:
             dots = _screentone(h, w)
             f *= (1.0 - np.random.uniform(0.2, 0.55) * dots)[..., None]
+        if np.random.rand() < BG_HATCH_PROB:
+            f *= (1.0 - _hatch_overlay(h, w, strength=float(np.random.uniform(0.2, 0.45))))[..., None]
         if np.random.rand() < BG_NOISE_PROB:
             f += np.random.normal(0, np.random.uniform(3, 10), (h, w, 1)).astype(np.float32)
         return np.clip(f, 0, 255).astype(np.uint8)
 
     @staticmethod
     def _sample_bubble_fill():
-        """(mode, fill_bgr, contour_bgr). Bubbles used to be pure white only."""
         mode = str(np.random.choice(BUBBLE_FILL_MODES, p=BUBBLE_FILL_P))
         black, white = (0, 0, 0), (255, 255, 255)
         if mode == "gray":
@@ -1868,14 +2260,9 @@ class Renderer:
             v = int(np.random.uniform(15, 70))
             w = int(np.random.uniform(190, 255))
             return mode, (v, v, v), (w, w, w)
-        return mode, white, black  # "white" and "tone" (tone gets a texture later)
+        return mode, white, black
 
-    def render_background(self, img, draw_bubble=None, tight=False):
-        """Add background and/or text bubble to a BGRA image, crop and return as BGR image.
-
-        ``tight=True`` (SFX) keeps only a thin margin around the ink and skips
-        the random loosening crop, so the result hugs the lettering.
-        """
+    def render_background(self, img, draw_bubble=None, tight=False, return_ink_box=False):
         if draw_bubble is None:
             draw_bubble = np.random.random() < 0.7
 
@@ -1886,14 +2273,12 @@ class Renderer:
         else:
             m0 = int(min(img.shape[:2]) * 0.3)
         img = crop_by_alpha(img, m0)
+        ink_box = (m0, m0, img.shape[1] - m0, img.shape[0] - m0)
 
         fill_mode, fill_bgr, contour_bgr = "white", (255, 255, 255), (0, 0, 0)
         if draw_bubble:
             edge_lum, _ = self._ink_edge(img)
             edge_lum = 0.0 if edge_lum is None else edge_lum
-            # Resample the fill until the ink edge is clearly distinct from it
-            # (screentone fills are checked at their darkest shade). Light ink
-            # on a light gray bubble, or dark ink on a dark box, never ships.
             for _ in range(BG_MAX_TRIES):
                 fill_mode, fill_bgr, contour_bgr = self._sample_bubble_fill()
                 ink = 255.0 - edge_lum if fill_mode == "dark" else edge_lum
@@ -1903,17 +2288,15 @@ class Renderer:
                     break
             else:
                 fill_mode, fill_bgr, contour_bgr = ("white", (255, 255, 255), (0, 0, 0))
-                if edge_lum > 150:  # light ink: use a dark caption box instead
+                if edge_lum > 150:
                     fill_mode, fill_bgr, contour_bgr = ("dark", (30, 30, 30), (235, 235, 235))
-            if fill_mode == "dark":  # light lettering on a dark caption box
+            if fill_mode == "dark":
                 img[:, :, :3] = 255 - img[:, :, :3]
         elif np.random.rand() < 0.5:
             img[:, :, :3] = 255 - img[:, :, :3]
 
         background = self._load_background(img.shape[0], img.shape[1])
         if draw_bubble:
-            # The lettering sits on the bubble fill, not on this art, so the art
-            # only needs to be varied (the bubble contrast is set by the fill).
             background = self._decorate_background(self._adjust_background(background, 128.0))
         else:
             background = self._make_background(background, img)
@@ -1955,8 +2338,6 @@ class Renderer:
             bubble = A.Compose(t)(image=bubble)["image"]
 
             if fill_mode == "tone":
-                # Screentone-filled bubble (dotted/shaded interior). The black
-                # contour stays black because it is multiplied by a value in (0, 1].
                 dots = _screentone(bubble.shape[0], bubble.shape[1])
                 shade = 1.0 - np.random.uniform(0.15, 0.45) * dots
                 bubble[:, :, :3] = (bubble[:, :, :3].astype(np.float32) * shade[..., None]).astype(np.uint8)
@@ -1966,15 +2347,12 @@ class Renderer:
         img = blend(img, background)
 
         if tight:
-            return img
+            return (img, ink_box) if return_ink_box else img
 
         ymin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
         ymax = img.shape[0] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
         xmin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
         xmax = img.shape[1] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
-        # Clamp: full-bleed ink (e.g. SFX speedlines spanning the canvas) can
-        # otherwise push ymin/xmin negative, which numpy interprets as
-        # wrap-around and yields an empty crop.
         ymin = max(0, ymin)
         xmin = max(0, xmin)
         ymax = min(img.shape[0], ymax)
@@ -1984,12 +2362,16 @@ class Renderer:
         if xmax <= xmin:
             xmin, xmax = 0, img.shape[1]
         img = img[ymin:ymax, xmin:xmax]
+        if return_ink_box:
+            bx0, by0, bx1, by1 = ink_box
+            ink_box = (
+                max(0, bx0 - xmin),
+                max(0, by0 - ymin),
+                min(img.shape[1], bx1 - xmin),
+                min(img.shape[0], by1 - ymin),
+            )
+            return img, ink_box
         return img
-
-    def lines_to_html(self, lines):
-        lines_str = "\n".join(["<p>" + line + "</p>" for line in lines])
-        html = f"<html><body>\n{lines_str}\n</body></html>"
-        return html
 
 
 def _advance(font, ch, letter_spacing_px):
@@ -2002,25 +2384,8 @@ def _advance(font, ch, letter_spacing_px):
     return w + letter_spacing_px
 
 
-def _char_op(ch, cx, cy, font, vertical, upright):
+def _char_op(ch, cx, cy, font, vertical, upright, cell=None, angle=0.0):
     if vertical and is_ascii(ch) and not upright and not ch.isspace():
-        # 'mixed' orientation: latin runs sideways in vertical text.
-        return {"kind": "char", "ch": ch, "cx": cx, "cy": cy, "font": font, "rotate": True, "ttb": False}
-    return {
-        "kind": "char",
-        "ch": ch,
-        "cx": cx,
-        "cy": cy,
-        "font": font,
-        "rotate": False,
-        "ttb": vertical and not is_ascii(ch),
-    }
-
-
-def _char_op_ex(ch, cx, cy, font, cell, angle, vertical, upright):
-    """Irregular-layout variant of ``_char_op`` with per-glyph cell/tilt."""
-    if vertical and is_ascii(ch) and not upright and not ch.isspace():
-        # 'mixed' orientation: latin runs sideways in vertical text.
         return {
             "kind": "char",
             "ch": ch,
@@ -2045,12 +2410,11 @@ def _char_op_ex(ch, cx, cy, font, cell, angle, vertical, upright):
     }
 
 
-def _draw_rotated_char(layer, ch, cx, cy, font, cell, fill, stroke_width, stroke_fill, angle=0.0):
-    """Draw a latin char rotated 90 deg clockwise (vertical 'mixed' mode).
+def _char_op_ex(ch, cx, cy, font, cell, angle, vertical, upright):
+    return _char_op(ch, cx, cy, font, vertical, upright, cell=cell, angle=angle)
 
-    ``angle`` adds a small extra tilt (counter-clockwise degrees, as in
-    ``Image.rotate``) used by the irregular layout mode.
-    """
+
+def _draw_rotated_char(layer, ch, cx, cy, font, cell, fill, stroke_width, stroke_fill, angle=0.0):
     cell = int(cell)
     tile = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
@@ -2066,14 +2430,10 @@ def _draw_rotated_char(layer, ch, cx, cy, font, cell, fill, stroke_width, stroke
 
 
 def _draw_tilted_char(layer, ch, cx, cy, font, cell, angle, fill, stroke_width, stroke_fill):
-    """Draw a glyph with a slight tilt (irregular layout mode).
-
-    The tile is oversized so small tilts never clip the glyph or its stroke.
-    """
     cell = int(cell)
     pad = int(stroke_width or 0) + 2
     size = math.ceil(cell * 1.5) + 2 * pad
-    size += size & 1  # even tile: centre on a pixel edge, identical across passes
+    size += size & 1
     tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
     kw = {"font": font, "fill": fill, "anchor": "mm"}
@@ -2081,43 +2441,48 @@ def _draw_tilted_char(layer, ch, cx, cy, font, cell, angle, fill, stroke_width, 
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
     draw.text((size / 2, size / 2), ch, **kw)
     tile = tile.rotate(angle, resample=Image.BICUBIC)
-    layer.paste(tile, (int(round(cx)) - size // 2, int(round(cy)) - size // 2), tile)
+    layer.paste(tile, (round(cx) - size // 2, round(cy) - size // 2), tile)
 
 
 def _draw_perspective_char(
-    layer, ch, cx, cy, font, cell, angle, persp, fill, stroke_width, stroke_fill,
-    rotate_mixed=False, ttb=False, aspect=None, pcoef=None,
+    layer,
+    ch,
+    cx,
+    cy,
+    font,
+    cell,
+    angle,
+    persp,
+    fill,
+    stroke_width,
+    stroke_fill,
+    rotate_mixed=False,
+    ttb=False,
+    lang="ja",
+    aspect=None,
+    pcoef=None,
 ):
-    """Draw one SFX glyph with stretch, tilt and a true perspective warp.
-
-    The glyph (with its stroke) is rasterized once on a tile that is sized from
-    the actual worst case (glyph ink x stretch x rotation x perspective) rather
-    than a fixed oversize, so the outline stays aligned, nothing clips and the
-    expensive rotate/warp passes touch as few pixels as possible. ``persp`` is
-    the max coefficient magnitude (typically 0.12-0.28): visible skew without
-    destroying legibility.
-    """
     cell = int(cell)
     pad = int(stroke_width or 0) + 4
     p = abs(float(persp))
     ax, ay = (float(aspect[0]), float(aspect[1])) if aspect else (1.0, 1.0)
     total_angle = (270.0 if rotate_mixed else 0.0) + float(angle or 0.0)
     rad = math.radians(total_angle)
-    rot_f = abs(math.cos(rad)) + abs(math.sin(rad))  # bounding-box growth under rotation
-    ink = math.ceil(cell * 1.25) + 2 * pad  # em box + overshoot + outline
+    rot_f = abs(math.cos(rad)) + abs(math.sin(rad))
+    ink = math.ceil(cell * 1.25) + 2 * pad
     size = max(8, math.ceil(ink * max(ax, ay, 1.0) * rot_f * (1.0 + p)) + 6)
-    size += size & 1  # even => the glyph centre sits on a pixel edge in every pass
+    size += size & 1
     tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(tile)
     kw = {"font": font, "fill": fill, "anchor": "mm"}
     if ttb:
-        kw.update(direction="ttb", language="ja")
+        kw.update(direction="ttb", language=str(lang or "ja"))
     if stroke_width:
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
     draw.text((size / 2, size / 2), ch, **kw)
     if aspect:
-        nw, nh = max(2, int(round(size * ax))), max(2, int(round(size * ay)))
-        nw += (size - nw) & 1  # keep the stretched glyph exactly centred (same parity as tile)
+        nw, nh = max(2, round(size * ax)), max(2, round(size * ay))
+        nw += (size - nw) & 1
         nh += (size - nh) & 1
         stretched = tile.resize((nw, nh), Image.BILINEAR)
         tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -2126,14 +2491,11 @@ def _draw_perspective_char(
         tile = tile.rotate(total_angle, resample=Image.BILINEAR)
     if p > 1e-6:
         u = pcoef if pcoef is not None else tuple(float(v) for v in np.random.uniform(-1.0, 1.0, 8))
-        # Warp is defined around the tile CENTRE and scaled by the glyph's em size,
-        # so it is identical no matter how big the tile is (the outer-edge pass
-        # uses a thicker stroke, hence a bigger tile, than the fill pass).
         ref = cell * 2.2
         a, b, c0 = 1.0 + u[0] * p, u[1] * p, u[2] * p * ref * 0.1
         d, e, f0 = u[3] * p, 1.0 + u[4] * p, u[5] * p * ref * 0.1
         g, h = u[6] * p / ref, u[7] * p / ref
-        tx = ty = size / 2.0  # tile centre (NOT the glyph's layer position cx, cy)
+        tx = ty = size / 2.0
         d0 = 1.0 - g * tx - h * ty
         coeffs = (
             (a + tx * g) / d0,
@@ -2146,11 +2508,10 @@ def _draw_perspective_char(
             h / d0,
         )
         tile = tile.transform((size, size), Image.PERSPECTIVE, coeffs, resample=Image.BILINEAR)
-    layer.paste(tile, (int(round(cx)) - size // 2, int(round(cy)) - size // 2), tile)
+    layer.paste(tile, (round(cx) - size // 2, round(cy) - size // 2), tile)
 
 
 def _draw_speedlines_layer(width, height, n_lines=40, color=(0, 0, 0, 255)):
-    """Radiating speedlines behind SFX text (non-text decor, excluded from GT)."""
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     cx, cy = width / 2, height / 2
@@ -2158,7 +2519,6 @@ def _draw_speedlines_layer(width, height, n_lines=40, color=(0, 0, 0, 255)):
     inner = min(width, height) * 0.28
     for _ in range(max(1, int(n_lines))):
         ang = float(np.random.uniform(0.0, 2.0 * math.pi))
-        # Random gaps keep the burst readable and varied.
         if np.random.rand() < 0.18:
             continue
         r0 = inner * float(np.random.uniform(0.6, 1.3))
@@ -2171,7 +2531,6 @@ def _draw_speedlines_layer(width, height, n_lines=40, color=(0, 0, 0, 255)):
 
 
 def _draw_parallel_speedlines_layer(width, height, n_lines=40, color=(0, 0, 0, 255)):
-    """Parallel motion lines (all at one angle) behind SFX text; non-GT decor."""
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     ang = float(np.random.choice([0.0, 90.0, np.random.uniform(0, 180)])) * math.pi / 180.0
@@ -2192,7 +2551,6 @@ def _draw_parallel_speedlines_layer(width, height, n_lines=40, color=(0, 0, 0, 2
 
 
 def _draw_burst_layer(width, height, ops):
-    """Jagged explosion balloon behind SFX text (non-text decor, excluded from GT)."""
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     if not ops:
         return layer
@@ -2214,25 +2572,17 @@ def _draw_burst_layer(width, height, ops):
 
 
 def _shear_layer(img, slant_deg):
-    """Shear an RGBA text layer horizontally (whole-block slant).
-
-    Applied after shadow/text compositing so outlines and glows stay aligned.
-    The canvas is widened to fit the skewed content, so no ink is clipped.
-    """
     k = math.tan(math.radians(slant_deg))
     w, h = img.size
     shift = k * h
     new_w = max(1, math.ceil(w + abs(shift)))
     tx = -min(0.0, shift)
-    # PIL AFFINE maps output coords back to input coords:
-    # forward x_out = x_in + k * y_in + tx  =>  x_in = x_out - k * y_out - tx.
     return img.transform(
         (new_w, h), Image.AFFINE, (1, -k, -tx, 0, 1, 0), resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0)
     )
 
 
 def _draw_tcy_tile(layer, text, cx, cy, font_path, font_size, fill, stroke_width, stroke_fill, angle=0.0):
-    """Squeeze a short ascii run into a single em square (tate-chu-yoko)."""
     cell = int(font_size)
     if not text:
         return
@@ -2255,59 +2605,20 @@ def _draw_tcy_tile(layer, text, cx, cy, font_path, font_size, fill, stroke_width
     layer.paste(tile, (round(cx - cell / 2), round(cy - cell / 2)), tile)
 
 
-class BrowserRenderer(Renderer):
-    """Legacy Chrome-based renderer, kept for side-by-side verification only.
-
-    Requires ``html2image`` + Chrome/Chromium. Not used by the generator.
-    """
-
-    def __init__(self, background_df=None):
-        from html2image import Html2Image
-
-        self.hti = Html2Image()
-        self.background_df = background_df if background_df is not None else get_default_background_df()
-        self.max_size = 600
-
-    def render_text(self, lines, override_css_params=None):
-        """Render text on transparent background and return as BGRA image."""
-        import os
-        import uuid
-
-        params = self.get_random_css_params()
-        if override_css_params:
-            params.update(override_css_params)
-
-        css = get_css(**params)
-
-        # this is just a rough estimate, image is cropped later anyway
-        size = (
-            int(max(len(line) for line in lines) * params["font_size"] * 1.5),
-            int(len(lines) * params["font_size"] * (3 + params["line_height"])),
-        )
-        if params["vertical"]:
-            size = size[::-1]
-        html = self.lines_to_html(lines)
-
-        filename = str(uuid.uuid4()) + ".png"
-        self.hti.screenshot(html_str=html, css_str=css, save_as=filename, size=size)
-        img = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
-        os.remove(filename)
-        return img, params
-
-
 def _screentone(h, w):
-    """Halftone dot pattern in 0..1 (1 = dot), random pitch and angle."""
     period = np.random.uniform(3.0, 8.0)
     ang = np.random.uniform(0, np.pi)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     u = (xx * np.cos(ang) + yy * np.sin(ang)) * (2 * np.pi / period)
     v = (-xx * np.sin(ang) + yy * np.cos(ang)) * (2 * np.pi / period)
-    pat = 0.5 * (np.cos(u) + np.cos(v))  # -1..1, peaks at dot centres
+    pat = 0.5 * (np.cos(u) + np.cos(v))
     return np.clip((pat - np.random.uniform(0.0, 0.6)) * 4.0, 0.0, 1.0)
 
 
 def crop_by_alpha(img, margin):
     y, x = np.where(img[:, :, 3] > 0)
+    if y.size == 0:
+        raise ValueError("rendered text layer is empty (nothing to crop)")
     ymin = y.min()
     ymax = y.max()
     xmin = x.min()
@@ -2325,13 +2636,6 @@ def blend(img, background):
 
 
 def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thickness=1, line_type=cv2.LINE_AA):
-    """From https://stackoverflow.com/a/60210706"""
-
-    #  corners:
-    #  p1 - p2
-    #  |     |
-    #  p4 - p3
-
     p1 = top_left
     p2 = (bottom_right[0], top_left[1])
     p3 = bottom_right
@@ -2340,13 +2644,10 @@ def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thicknes
     height = abs(bottom_right[1] - top_left[1])
     width = abs(bottom_right[0] - top_left[0])
 
-    if radius > 1:
-        radius = 1
-
+    radius = min(radius, 1)
     corner_radius = int(radius * (min(height, width) / 2))
 
     if thickness < 0:
-        # big rect
         top_left_main_rect = (int(p1[0] + corner_radius), int(p1[1]))
         bottom_right_main_rect = (int(p3[0] - corner_radius), int(p3[1]))
 
@@ -2364,7 +2665,6 @@ def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thicknes
 
         [cv2.rectangle(src, rect[0], rect[1], color, thickness) for rect in all_rects]
 
-    # draw straight lines
     cv2.line(
         src,
         (p1[0] + corner_radius, p1[1]),
@@ -2398,7 +2698,6 @@ def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thicknes
         line_type,
     )
 
-    # draw arcs
     cv2.ellipse(
         src,
         (p1[0] + corner_radius, p1[1] + corner_radius),
@@ -2445,57 +2744,3 @@ def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thicknes
     )
 
     return src
-
-
-def get_css(
-    font_size,
-    font_path,
-    vertical=True,
-    background_color="white",
-    text_color="black",
-    shadow_size=0,
-    shadow_color="black",
-    stroke_size=0,
-    stroke_color="black",
-    letter_spacing=None,
-    line_height=0.5,
-    text_orientation=None,
-    **_ignored,
-):
-    styles = [
-        f"background-color: {background_color};",
-        f"font-size: {font_size}px;",
-        f"color: {text_color};",
-        "font-family: custom;",
-        f"line-height: {line_height};",
-        "margin: 20px;",
-    ]
-
-    if text_orientation:
-        styles.append(f"text-orientation: {text_orientation};")
-
-    if vertical:
-        styles.append("writing-mode: vertical-rl;")
-
-    if shadow_size > 0:
-        styles.append(f"text-shadow: 0 0 {shadow_size}px {shadow_color};")
-
-    if stroke_size > 0:
-        # stroke is simulated by shadow overlaid multiple times
-        styles.extend(
-            [
-                "text-shadow: " + ",".join([f"0 0 {stroke_size}px {stroke_color}"] * 10 * stroke_size) + ";",
-                "-webkit-font-smoothing: antialiased;",
-            ]
-        )
-
-    if letter_spacing:
-        styles.append(f"letter-spacing: {letter_spacing}em;")
-
-    font_path = font_path.replace("\\", "/")
-
-    styles_str = "\n".join(styles)
-    css = ""
-    css += '\n@font-face {\nfont-family: custom;\nsrc: url("' + font_path + '");\n}\n'
-    css += "body {\n" + styles_str + "\n}"
-    return css

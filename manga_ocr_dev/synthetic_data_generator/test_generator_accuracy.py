@@ -3,11 +3,12 @@
 Needs the same environment as the generator itself (fonts.csv, vocab.csv,
 backgrounds). Run: ``pytest -q test_generator_accuracy.py``.
 """
+
 import numpy as np
 import pytest
 
 from manga_ocr_dev.synthetic_data_generator.generator import SyntheticDataGenerator
-from manga_ocr_dev.synthetic_data_generator.renderer import Renderer, _get_font, _parse_line
+from manga_ocr_dev.synthetic_data_generator.renderer import Renderer, _parse_line
 
 
 @pytest.fixture(scope="module")
@@ -18,9 +19,19 @@ def gen():
 def _layout(vertical, lines):
     font_path = next(iter(SyntheticDataGenerator().sfx_fonts))
     _, _, ops = Renderer._layout_sfx(
-        [_parse_line(l) for l in lines], vertical=vertical, font_path=font_path, font_size=100,
-        line_height=0.3, letter_spacing=0.0, upright=True, margin=20, pad=4,
-        curve="straight", persp=0.0, rotate=0.0, wobble=0.0,
+        [_parse_line(l) for l in lines],
+        vertical=vertical,
+        font_path=font_path,
+        font_size=100,
+        line_height=0.3,
+        letter_spacing=0.0,
+        upright=True,
+        margin=20,
+        pad=4,
+        curve="straight",
+        persp=0.0,
+        rotate=0.0,
+        wobble=0.0,
     )
     return ops
 
@@ -92,7 +103,7 @@ def test_renderer_refuses_tofu(gen):
     from manga_ocr_dev.synthetic_data_generator.utils import MissingGlyphError, is_drawable
 
     path = next(iter(gen.font_map))
-    missing = next(c for c in "\U0010FFFD\uE0FF" if not is_drawable(path, c) or True)
+    missing = next(c for c in "\U0010fffd\ue0ff" if not is_drawable(path, c) or True)
     if is_drawable(path, missing):
         pytest.skip("font unexpectedly draws the probe character")
     with pytest.raises(MissingGlyphError):

@@ -1,156 +1,163 @@
+# Manga OCR Better Synth
 
-- My Training Logs
-  - 2024-12-31, after several experiments, by using manga109s data + 1.5 million synthetic data, I could get a cer 0.1017, which is comparable to cer 0.1056 of original author's model.
+A fast, flexible, and robust synthetic Japanese manga OCR data generation toolkit.
 
-|   method   |  epoches   |  validation cer    |
-| ---- | ---- | ---- |
-|   only manga109s data, no pretraining weights(cold start), deit tiny + bert (2 decoder layers)   | 100+     |   around 20%   |
-|   only manga109s data, with pretraining weights, deit tiny + bert(2 decoder layers)  |  100+    |  around 13%    |
-|   only manga109s data, with pretraining weights, deit tiny + bert(12 decoder layers) |  100+    |  around 13%    |
-|   manga109s data + 1.5 million synthetic data, with pretraining weights, deit tiny + bert(2 decoder layers)  |  15+    |  around 10%    |
+This repository provides an end-to-end pipeline to generate realistic synthetic training datasets imitating Japanese manga speech bubbles, handwritten lettering, and sound effects (SFX), with zero browser dependencies.
 
-- Notes
-  - update to get_model: it's in my_get_model.py, more straightforward.
-  - see Examples section for comparing my trained model and the model trained by original author
-  - only using manga109s data is not enough, the dataset is too small, i.e., only 102253 data samples, I'll need to try using synthetic data.
-  - I have manually created a tiny dataset, using Jump manga 2025-3 episode, only 501 items, the cer is 0.1643 on this dataset, original author's cer is 0.1204, still need to check the reason.
+---
 
-# Manga OCR
+## Key Features
 
-Optical character recognition for Japanese text, with the main focus being Japanese manga.
-It uses a custom end-to-end model built with Transformers' [Vision Encoder Decoder](https://huggingface.co/docs/transformers/model_doc/vision-encoder-decoder) framework. 
+- **Pure Pillow Rendering Engine**: Replaces legacy headless Chrome (`html2image`) browser screenshots with direct Pillow rendering. Runs in ~10–25 ms per image (~30x faster) without external browser binaries.
+- **Multiprocess Parallelism**: True multi-core generation using `process_map` for maximum hardware utilization.
+- **Rich Japanese Layouts**:
+  - Vertical text (`vertical-rl`) with right-to-left column progression and horizontal text.
+  - Furigana / ruby text (`<ruby>漢字<rt>かんじ</rt></ruby>`).
+  - Tate-chū-yoko (`text-combine-upright`) for mixed vertical Latin digits/words.
+  - Irregular hand-lettered speech bubble variations: staggered line starts, per-line font sizes, baseline wobble, slight tilt, and shrunken small kana.
+  - Whole-block slant / shear (mild italic leans to dramatic 30° skews).
+- **Dedicated SFX (Onomatopoeia) Mode**:
+  - Over 200 base Japanese sound effects combined procedurally (stretched vowels, repeats, stutters, compound SFX).
+  - 7 baseline curve paths (`arc`, `wave`, `diagonal`, `straight`, `zigzag`, `bounce`, `hill`).
+  - True per-glyph perspective warping, per-glyph size/tilt, thick stroke outlines, and double (black-outer / white-inner) edges.
+  - Radiating speedlines and burst balloons.
+  - Accurate ground truth: only font-rendered glyphs are included in labels (never background decor).
+- **Chromatic & Multi-Color Text**:
+  - Supports vibrant color pages, covers, and SFX lettering (hot pink, red, cyan, lime, yellow, purple, etc.).
+  - `per_line` color alternation (emphasis lettering) and `per_char` rainbow fills.
+  - Automatic WCAG contrast enforcement (light ink automatically receives dark outlines and vice-versa).
+- **Corpus Processing & Streaming**:
+  - Stream dialogue subtitles from [Japanese Dialogue Dataset](https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset).
+  - Stream web novel chapters from [Japanese Novels 23M](https://huggingface.co/datasets/OmniAICreator/Japanese-Novels-23M).
+  - Automated subtitle ASS markup stripping, Aozora Bunko formatting cleanup, and rolling de-duplication.
+- **Tofu Detection & Font Auditing**:
+  - Pre-scans and verifies font character coverage against FreeType glyph rasters to prevent missing character boxes in synthetic output.
+- **Optional Real Handwritten Kana**:
+  - Harvest annotated crops from AnimeText-OCR, cut kana locally with `manga-ocr-charspot-small`, optionally verify with Gemini, then clean/upscale/upright them into a local kana bank. Enable it per run with `--real_kana` (off by default, like the SFX split) to swap only eligible kana for real handwriting; kanji, Latin, digits and punctuation stay font-rendered, so labels and pixels remain aligned.
 
-Manga OCR can be used as a general purpose printed Japanese OCR, but its main goal was to provide a high quality
-text recognition, robust against various scenarios specific to manga:
-- both vertical and horizontal text
-- text with furigana
-- text overlaid on images
-- wide variety of fonts and font styles
-- low quality images
+---
 
-Unlike many OCR models, Manga OCR supports recognizing multi-line text in a single forward pass,
-so that text bubbles found in manga can be processed at once, without splitting them into lines.
+## Installation
 
-See also:
-- [Poricom](https://github.com/bluaxees/Poricom), a GUI reader, which uses manga-ocr
-- [mokuro](https://github.com/kha-white/mokuro), a tool, which uses manga-ocr to generate an HTML overlay for manga
-- [Xelieu's guide](https://rentry.co/lazyXel), a comprehensive guide on setting up a reading and mining workflow with manga-ocr/mokuro (and many other useful tips)
-- Development code, including code for training and synthetic data generation: [link](manga_ocr_dev)
-- Description of synthetic data generation pipeline + examples of generated images: [link](manga_ocr_dev/synthetic_data_generator)
+```bash
+git clone https://github.com/your-username/manga-ocr-better-synth.git
+cd manga-ocr-better-synth
 
-# Installation
+# Install required dependencies
+pip install -r manga_ocr_dev/requirements.txt
+```
 
-You need Python 3.6 or newer. Please note, that the newest Python release might not be supported due to a PyTorch dependency, which often breaks with new Python releases and needs some time to catch up.
-Refer to [PyTorch website](https://pytorch.org/get-started/locally/) for a list of supported Python versions.
+Optional real handwritten-kana pipeline (vision model + optional DINO or
+Mercury handwriting scoring):
 
-Some users have reported problems with Python installed from Microsoft Store. If you see an error:
-`ImportError: DLL load failed while importing fugashi: The specified module could not be found.`,
-try installing Python from the [official site](https://www.python.org/downloads).
+```bash
+pip install -e '.[kana,scoring]'
+```
 
-If you want to run with GPU, install PyTorch as described [here](https://pytorch.org/get-started/locally/#start-locally),
-otherwise this step can be skipped.
+See [`docs/real-kana.md`](docs/real-kana.md) for credentials, commands and the
+bank format. The bank is empty by default; without one, rendering is unchanged.
 
-## Troubleshooting
+---
 
-- `ImportError: DLL load failed while importing fugashi: The specified module could not be found.` - might be because of Python installed from Microsoft Store, try installing Python from the [official site](https://www.python.org/downloads)
-- problem with installing `mecab-python3` on ARM architecture - try [this workaround](https://github.com/kha-white/manga-ocr/issues/16)
+## Quick Start
 
-# Usage
+### 1. Configure Paths
+
+Set optional environment variables in your shell or edit `manga_ocr_dev/env.py`:
+
+```bash
+export FONTS_ROOT="/path/to/japanese/fonts"
+export DATA_SYNTHETIC_ROOT="/path/to/output/synthetic_data"
+```
+
+### 2. Prepare Dialogue & Novel Text
+
+Download or stream Japanese text lines into package CSVs:
+
+```bash
+# Export 10 packages (100,000 lines each) of mixed dialogue and novel text
+python -m manga_ocr_dev.data.process_text --num_packages=10 --num_lines_in_each_package=100000
+
+# Export dialogue only (anime & drama subtitles)
+python -m manga_ocr_dev.data.process_dialogue --num_packages=10
+```
+
+### 3. Generate Background Images
+
+Extract text-free background crops from manga/anime illustrations:
+
+```bash
+python -m manga_ocr_dev.data.generate_backgrounds_animetext --n_images 5000
+```
+
+### 4. Scan Font Coverage
+
+Index character support across your local font directory:
+
+```bash
+python -m manga_ocr_dev.synthetic_data_generator.scan_fonts
+```
+
+### 5. Generate Synthetic Images
+
+Run batch generation for dialogue and sound effects:
+
+```bash
+# Standard dialogue package
+python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --max_workers 16
+
+# Sound effects (SFX) split
+python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --split sfx --n_random 50000 --max_workers 16
+```
+
+---
 
 ## Python API
 
-```python
-from manga_ocr import MangaOcr
-
-mocr = MangaOcr()
-text = mocr('/path/to/img')
-```
-
-or
+You can also use the renderer directly in your own scripts:
 
 ```python
-import PIL.Image
+from manga_ocr_dev.synthetic_data_generator.renderer import Renderer
 
-from manga_ocr import MangaOcr
+renderer = Renderer()
 
-mocr = MangaOcr()
-img = PIL.Image.open('/path/to/img')
-text = mocr(img)
+# Render custom multi-line Japanese text with stroke outline
+img, params = renderer.render(
+    lines=["やはり俺の青春ラブコメは", "まちがっている。"],
+    override_css_params={
+        "vertical": True,
+        "font_size": 48,
+        "stroke_size": 4,
+        "text_color": "black",
+        "stroke_color": "white",
+    },
+)
 ```
 
-## Running in the background
+---
 
-Manga OCR can run in the background and process new images as they appear.
+## Testing
 
-You might use a tool like [ShareX](https://getsharex.com/) or [Flameshot](https://flameshot.org/) to manually capture a region of the screen and let the
-OCR read it either from the system clipboard, or a specified directory. By default, Manga OCR will write recognized text to clipboard,
-from which it can be read by a dictionary like [Yomichan](https://github.com/FooSoft/yomichan).
+Run the test suite with pytest:
 
-Clipboard mode on Linux requires `wl-copy` for Wayland sessions or `xclip` for X11 sessions. You can find out which one your system needs by running `echo $XDG_SESSION_TYPE` in the terminal.
+```bash
+pytest tests/ -v
+```
 
-Your full setup for reading manga in Japanese with a dictionary might look like this:
+---
 
-capture region with ShareX -> write image to clipboard -> Manga OCR -> write text to clipboard -> Yomichan
+## Showcase Samples
 
-https://user-images.githubusercontent.com/22717958/150238361-052b95d1-0152-485f-a441-48a957536239.mp4
+Sample images generated using the renderer are located in `synth_samples/`. They use fonts sampled
+from the installed manga-font library and are composited over the real background dataset. To
+regenerate them:
 
-- To read images from clipboard and write recognized texts to clipboard, run in command line:
-    ```commandline
-    manga_ocr
-    ```
-- To read images from ShareX's screenshot folder, run in command line:
-    ```commandline
-    manga_ocr "/path/to/sharex/screenshot/folder"
-    ```
-Note that when running in the clipboard scanning mode, any image that you copy to clipboard will be processed by OCR and replaced
-by recognized text. If you want to be able to copy and paste images as usual, you should use the folder scanning mode instead
-and define a separate task in ShareX just for OCR, which saves screenshots to some folder without copying them to clipboard.
+```bash
+python synth_samples/generate.py
+```
 
-When running for the first time, downloading the model (~400 MB) might take a few minutes.
-The OCR is ready to use after `OCR ready` message appears in the logs.
+---
 
-- To see other options, run in command line:
-    ```commandline
-    manga_ocr --help
-    ```
+## License
 
-If `manga_ocr` doesn't work, you might also try replacing it with `python -m manga_ocr`.
-
-## Usage tips
-
-- OCR supports multi-line text, but the longer the text, the more likely some errors are to occur.
-  If the recognition failed for some part of a longer text, you might try to run it on a smaller portion of the image.
-- The model was trained specifically to handle manga well, but should do a decent job on other types of printed text,
-  such as novels or video games. It probably won't be able to handle handwritten text though. 
-- The model always attempts to recognize some text on the image, even if there is none.
-  Because it uses a transformer decoder (and therefore has some understanding of the Japanese language),
-  it might even "dream up" some realistically looking sentences! This shouldn't be a problem for most use cases,
-  but it might get improved in the next version.
-
-# Examples
-
-Here are some cherry-picked examples showing the capability of the model. 
-
-| image                | Manga OCR result | My trained model result |
-|----------------------|------------------| ------------------| 
-| ![](assets/examples/00.jpg) | 素直にあやまるしか | 素直にあやまるしか | 
-| ![](assets/examples/01.jpg) | 立川で見た〝穴〟の下の巨大な眼は： | 立川で見た”穴”の下の巨大な眼は．．．|
-| ![](assets/examples/02.jpg) | 実戦剣術も一流です | 実験剣術も一緒です |
-| ![](assets/examples/03.jpg) | 第３０話重苦しい闇の奥で静かに呼吸づきながら | 第３０話重告しい闇の裏で静かに呼ぶつきましょうね |
-| ![](assets/examples/04.jpg) | よかったじゃないわよ！何逃げてるのよ！！早くあいつを退治してよ！ |  よかったじゃないわよ！！何逃げてるのよ！？早くあいつを退治してよ！ |
-| ![](assets/examples/05.jpg) | ぎゃっ | ぎゃっ | 
-| ![](assets/examples/06.jpg) | ピンポーーン | ピンポーーン| 
-| ![](assets/examples/07.jpg) | ＬＩＮＫ！私達７人の力でガノンの塔の結界をやぶります | ＬＩＮＫ！私達２人の方でカンジの皆の結界をやぶります | 
-| ![](assets/examples/08.jpg) | ファイアパンチ | ファイアパンチ | 
-| ![](assets/examples/09.jpg) | 少し黙っている | 少し黙っている | 
-| ![](assets/examples/10.jpg) | わかるかな〜？ | わかるかな～？ |
-| ![](assets/examples/11.jpg) | 警察にも先生にも町中の人達に！！ | 警察にも先生にも前中の人達に！！ |
-
-# Contact
-For any inquiries, please feel free to contact me at kha-white@mail.com
-
-# Acknowledgments
-
-This project was done with the usage of:
-- [Manga109-s](http://www.manga109.org/en/download_s.html) dataset
-- [CC-100](https://data.statmt.org/cc-100/) dataset
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

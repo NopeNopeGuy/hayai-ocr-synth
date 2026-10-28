@@ -1,7 +1,10 @@
+"""Data preprocessing and corpus extraction utilities for manga OCR."""
+
 from manga_ocr_dev.data.process_dialogue import export_dialogue
 from manga_ocr_dev.data.process_text import (
     clean_dialogue_line,
     clean_novel_text,
+    detect_line_lang,
     export_lines,
     iter_dialogue_stream,
     iter_mixed_stream,
@@ -12,10 +15,11 @@ from manga_ocr_dev.data.process_text import (
 __all__ = [
     "clean_dialogue_line",
     "clean_novel_text",
-    "split_novel_chapter",
-    "export_lines",
+    "detect_line_lang",
     "export_dialogue",
+    "export_lines",
     "iter_dialogue_stream",
-    "iter_novel_stream",
     "iter_mixed_stream",
+    "iter_novel_stream",
+    "split_novel_chapter",
 ]

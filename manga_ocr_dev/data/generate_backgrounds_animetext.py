@@ -1,17 +1,17 @@
 """Generate clean (text-free) background crops from deepghs/AnimeText.
 
-Replaces Manga109s backgrounds (see generate_backgrounds.py) with anime-art
-backgrounds for the synth dataset.
+Extracts manga/anime illustration background crops without text overlay for synthetic data rendering.
 
-Source: https://huggingface.co/datasets/deepghs/AnimeText (train split only).
+Source: https://huggingface.co/datasets/deepghs/AnimeText (train split).
 Boxes are YOLO normalized xywh (center-x, center-y, w, h in 0..1); category
-0 = text, 1 = hard_negative. Both are masked so crops are clean.
+0 = text, 1 = hard_negative. Both are masked so crops are text-free.
 
 Usage:
     python -m manga_ocr_dev.data.generate_backgrounds_animetext --n_images 500
     python -m manga_ocr_dev.data.generate_backgrounds_animetext --n_images 10000 --out_dir ~/data/manga/AnimeText_background
 """
 
+import os
 from pathlib import Path
 
 import cv2
@@ -19,13 +19,13 @@ import fire
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import os
+
 from manga_ocr_dev.data.generate_backgrounds import find_rectangle
 from manga_ocr_dev.env import BACKGROUND_ANIMETEXT_DIR
 
 
 def yolo_boxes_to_mask(h, w, bboxes, dilation=3):
-    """Build a True=masked (has text) boolean mask from YOLO normalized xywh boxes."""
+    """Build a boolean mask (True = masked / contains text) from YOLO normalized xywh boxes."""
     mask = np.zeros((h, w), dtype=bool)
     for box in bboxes or []:
         xc, yc, bw, bh = (float(v) for v in box)
@@ -52,6 +52,7 @@ def generate_backgrounds_animetext(
     seed=0,
     dilation=3,
 ):
+    """Stream anime images, mask detected text regions, and extract clean background crops."""
     from datasets import load_dataset
 
     out_dir = Path(out_dir).expanduser() if out_dir else BACKGROUND_ANIMETEXT_DIR
@@ -64,7 +65,7 @@ def generate_backgrounds_animetext(
     n_seen = n_kept = n_attempts = n_skipped_full = 0
 
     it = ds.take(n_images) if n_images else ds
-    for row in tqdm(it, total=n_images or None, desc=f"AnimeText pilot ({split})"):
+    for row in tqdm(it, total=n_images or None, desc=f"AnimeText processing ({split})"):
         n_seen += 1
         image_id = row.get("image_id", n_seen)
         img = np.array(row["image"].convert("RGB"))[:, :, ::-1]  # RGB -> BGR for cv2
@@ -113,4 +114,5 @@ def generate_backgrounds_animetext(
 
 if __name__ == "__main__":
     fire.Fire(generate_backgrounds_animetext)
+    # Terminate process directly to prevent hung threads during HuggingFace dataset streaming cleanup
     os._exit(0)

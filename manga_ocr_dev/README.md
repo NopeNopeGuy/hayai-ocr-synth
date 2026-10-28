@@ -1,113 +1,127 @@
-# Project structure
+# manga_ocr_dev
+
+Development toolkit for generating high-fidelity synthetic Japanese manga OCR training datasets.
+
+## Project Structure
 
 ```
-assets/                       # assets (see description below)
-manga_ocr/                    # release code (inference only)
-manga_ocr_dev/                # development code
-   env.py                     # global constants
-   data/                      # data preprocessing
-   synthetic_data_generator/  # generation of synthetic image-text pairs
-   training/                  # model training
+assets/                       # Asset files (fonts.csv, len_to_p.csv, vocab.csv, etc.)
+manga_ocr_dev/                # Core development package
+   env.py                     # Environment variables and path configurations
+   data/                      # Text corpus & background image preprocessing
+   synthetic_data_generator/  # Pillow-based high-throughput synthetic text generator
+tests/                        # Test suite for rendering engine and text processing
 ```
 
-## assets
+## Assets
 
-### fonts.csv
-csv with columns:
-- font_path: path to font file, relative to `FONTS_ROOT`
-- supported_chars: string of characters supported by this font
-- num_chars: number of supported characters
-- label: common/regular/special (used to sample regular fonts more often than special)
+### `fonts.csv`
+CSV mapping font paths to character coverage and frequency weights:
+- `font_path`: Path to font file, relative to `FONTS_ROOT`.
+- `supported_chars`: String of characters verified to render without missing glyph boxes.
+- `num_chars`: Number of supported characters.
+- `label`: `common`, `regular`, or `special` (used to weight font sampling).
 
-List of fonts with metadata used by synthetic data generator.
-Provided file is just an example, you have to generate similar file for your own set of fonts,
-using `manga_ocr_dev/synthetic_data_generator/scan_fonts.py` script.
-Note that `label` will be filled with `regular` by default. You have to label your special fonts manually.
+To generate `fonts.csv` for your own font collection, run `manga_ocr_dev/synthetic_data_generator/scan_fonts.py`.
 
-### lines_example.csv
-csv with columns:
-- source: source of text
-- id: unique id of the line
-- line: line from language corpus
+### `lines_example.csv`
+Sample text line package with columns: `source`, `id`, `line`.
 
-Example of csv used for synthetic data generation.
+### `len_to_p.csv`
+Probability distribution over line lengths derived from empirical manga corpora.
 
-### len_to_p.csv
-csv with columns:
-- len: length of text
-- p: probability of text of this length occurring in manga
+### `vocab.csv`
+List of supported characters recognized by the tokenizer.
 
-Used by synthetic data generator to more-or-less match the natural distribution of text lengths.
-Computed based on Manga109-s dataset.
+---
 
-### vocab.csv
-List of all characters supported by tokenizer.
+## Configuration (`env.py`)
 
-# Training OCR
+Paths are configured via environment variables with sensible defaults:
 
-`env.py` contains global constants used across the repo. Set your paths to data etc. there.
+| Variable | Description | Default |
+|---|---|---|
+| `MANGA_OCR_ASSETS_PATH` | Path to asset files directory | `./assets` |
+| `FONTS_ROOT` | Directory containing font collections | `~/data/jp_fonts` |
+| `DATA_SYNTHETIC_ROOT` | Destination directory for output packages | `~/data/synthetic` (or `/mnt/Synth_Images` if present) |
+| `BACKGROUND_DIR` | Manga109-s background crops directory | `~/data/manga/Manga109s/background` |
+| `BACKGROUND_ANIMETEXT_DIR` | AnimeText background crops directory | `~/data/manga/AnimeText_background` |
+| `MANGA109_ROOT` | Manga109-s dataset root | `~/data/manga/Manga109s` |
 
-1. Download [Manga109-s](http://www.manga109.org/en/download_s.html) dataset.
-2. Set `MANGA109_ROOT`, so that your directory structure looks like this: 
-    ```
-    <MANGA109_ROOT>/
-        Manga109s_released_2021_02_28/
-            annotations/
-            annotations.v2018.05.31/
-            images/
-            books.txt
-            readme.txt
-    ```
-3. Preprocess Manga109-s with `data/process_manga109s.py`
-4. Optionally generate synthetic data (see below)
-5. Train with `manga_ocr_dev/training/train.py`
+---
 
-# Synthetic data generation
+## Data Pipeline
 
-Generated data is split into packages (named `0000`, `0001` etc.) for easier management of large dataset.
-Each package is assumed to have similar data distribution, so that a properly balanced dataset
-can be built from any subset of packages.
+### 1. Extract Text Lines
 
-Data generation pipeline assumes following directory structure:
+Generate line packages from streaming Hugging Face datasets or local files:
+
+```bash
+# Mixed dialogue + novels (streams from HuggingFace on the fly)
+python -m manga_ocr_dev.data.process_text --num_packages=10 --num_lines_in_each_package=100000
+
+# Dialogue-only (subtitles from anime/drama)
+python -m manga_ocr_dev.data.process_dialogue --num_packages=10
+
+# Web novels only (Narou, Kakuyomu, Hameln, etc.)
+python -m manga_ocr_dev.data.process_text --source_type=novel --num_packages=10
+```
+
+Supported online datasets:
+- [Japanese Dialogue Dataset](https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset) (`anime_tv`, `anime_movie`, `drama_tv`, `drama_movie`, `unsorted`)
+- [Japanese Novels 23M](https://huggingface.co/datasets/OmniAICreator/Japanese-Novels-23M) (`Narou_NSFW`, `Kakuyomu`, `Narou_SFW`, `Hameln`, `aozorabunko`, `novecomi`, `pixiv`)
+
+### 2. Extract Backgrounds
+
+Extract clean, text-free background patches:
+
+```bash
+# From AnimeText dataset (recommended)
+python -m manga_ocr_dev.data.generate_backgrounds_animetext --n_images 10000
+
+# Or from Manga109-s (requires Manga109-s dataset)
+python -m manga_ocr_dev.data.generate_backgrounds
+```
+
+### 3. Scan Font Coverage
+
+Index and verify character support across your local font library:
+
+```bash
+python -m manga_ocr_dev.synthetic_data_generator.scan_fonts
+```
+
+### 4. Run Synthetic Generation
+
+Render synthetic image-text pairs:
+
+```bash
+# Generate dialogue package 0000
+python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --max_workers 16
+
+# Generate SFX (sound effect) split
+python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --split sfx --n_random 50000 --max_workers 16
+```
+
+---
+
+## Directory Layout for Synthetic Output
 
 ```
 <DATA_SYNTHETIC_ROOT>/
-   img/           # generated images (output from generation pipeline)
+   img/           # Generated dialogue images
       0000/
-      0001/
       ...
-   lines/         # lines from corpus (input to generation pipeline)
-      0000.csv
-      0001.csv
+   img_sfx/       # Generated SFX images
+      0000/
       ...
-   meta/          # metadata (output from generation pipeline)
+   lines/         # Text line packages (input to generation)
       0000.csv
-      0001.csv
+      ...
+   meta/          # Dialogue image-text metadata
+      0000.csv
+      ...
+   meta_sfx/      # SFX image-text metadata
+      0000.csv
       ...
 ```
-
-To use a language corpus for data generation, `lines/*.csv` files must be provided.
-For a small example of such file see `assets/lines_example.csv`.
-
-You can generate line packages using `manga_ocr_dev/data/process_text.py` or `manga_ocr_dev/data/process_dialogue.py` from:
-- [Japanese Dialogue Dataset](https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset) (splits: `anime_tv`, `anime_movie`, `drama_tv`, `drama_movie`, `unsorted`)
-- [Japanese Novels 23M](https://huggingface.co/datasets/OmniAICreator/Japanese-Novels-23M) (configs: `Narou_NSFW`, `Kakuyomu`, `Narou_SFW`, `Hameln`, `aozorabunko`, `novecomi`, `pixiv`)
-
-```bash
-# Mixed dialogue + novels (default, streams from HuggingFace on the fly)
-python manga_ocr_dev/data/process_text.py --num_packages=10 --num_lines_in_each_package=100000
-
-# Dialogue-only (subtitles from anime/drama)
-python manga_ocr_dev/data/process_dialogue.py --num_packages=10
-
-# Novels-only (including Narou_NSFW)
-python manga_ocr_dev/data/process_text.py --source_type=novel --num_packages=10
-```
-
-To generate synthetic data:
-1. Generate backgrounds with `data/generate_backgrounds.py`.
-2. Put your fonts in `<FONTS_ROOT>`.
-3. Generate fonts metadata with `synthetic_data_generator/scan_fonts.py`.
-4. Optionally manually label your fonts with `common/regular/special` labels.
-5. Provide `<DATA_SYNTHETIC_ROOT>/lines/*.csv` with `process_text.py`.
-6. Run `synthetic_data_generator/run_generate.py` for each package.

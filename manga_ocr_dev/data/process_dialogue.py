@@ -1,10 +1,11 @@
-"""
-Process dialogue dataset (https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset)
-into line packages for synthetic manga OCR data generation.
+"""Process Japanese dialogue datasets into line packages for synthetic manga OCR data generation.
 
-Splits: anime_tv, anime_movie, drama_tv, drama_movie, unsorted.
-Can also process novel sources or mix with novels via --source_type=both or novel options.
+Extracts cleaned dialogue lines from:
+- Nan-Do/OpenSubtitlesJapanese (OpenSubtitles.parquet: one row per subtitle block)
+- Optional novel sources or mixed dialogue/novel streams via `--source_type`.
 """
+
+from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
@@ -12,14 +13,14 @@ from pathlib import Path
 
 import fire
 
-# Ensure manga_ocr_dev can be imported
+# Ensure manga_ocr_dev root is on sys.path if run as a standalone script
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from manga_ocr_dev.data.process_text import (
+    DEFAULT_DIALOGUE_DATA_FILE,
     DEFAULT_DIALOGUE_DATASET,
-    DEFAULT_DIALOGUE_SPLITS,
     DEFAULT_NOVEL_CONFIGS,
     DEFAULT_NOVEL_DATASET,
     export_lines,
@@ -31,7 +32,7 @@ def export_dialogue(
     num_packages: int = 10,
     start_package: int = 0,
     source_type: str = "dialogue",
-    dialogue_splits: Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
+    dialogue_data_file: str = DEFAULT_DIALOGUE_DATA_FILE,
     novel_configs: Sequence[str] = DEFAULT_NOVEL_CONFIGS,
     dialogue_ratio: float = 0.5,
     streaming: bool = True,
@@ -44,10 +45,13 @@ def export_dialogue(
     max_len: int = 200,
     dedup_window: int = 50_000,
     seed: int = 42,
-):
-    """Export dialogue lines from JustANormalTinkerer/Japanese-Dialogue-Dataset
+    lang: str | None = None,
+    strip_leading_quotes: bool = True,
+) -> list[Path]:
+    """Export dialogue lines into package CSV files for synthetic data generation.
 
-    into package CSV files for the synthetic generator.
+    :param lang: Keep only lines of this language ('ja', 'ko', 'zh', 'en').
+        None (default) keeps every line.
     """
     return export_lines(
         num_lines_in_each_package=num_lines_in_each_package,
@@ -55,7 +59,7 @@ def export_dialogue(
         start_package=start_package,
         source_type=source_type,
         dialogue_ratio=dialogue_ratio,
-        dialogue_splits=dialogue_splits,
+        dialogue_data_file=dialogue_data_file,
         novel_configs=novel_configs,
         streaming=streaming,
         dialogue_dataset_name=dialogue_dataset_name,
@@ -67,6 +71,8 @@ def export_dialogue(
         max_len=max_len,
         dedup_window=dedup_window,
         seed=seed,
+        lang=lang,
+        strip_leading_quotes=strip_leading_quotes,
     )
 
 

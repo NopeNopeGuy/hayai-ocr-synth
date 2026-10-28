@@ -103,11 +103,7 @@ def test_export_lines_local_mock():
         tmp_path = Path(tmpdir)
         dialogue_file = tmp_path / "dummy_dialogue.txt"
         dialogue_file.write_text(
-            "Hello world!\n"
-            "こんにちは、世界！\n"
-            "「大丈夫？」\n"
-            "\"Yes, absolutely!\"\n"
-            "これはテストです。\n",
+            'Hello world!\nこんにちは、世界！\n「大丈夫？」\n"Yes, absolutely!"\nこれはテストです。\n',
             encoding="utf-8",
         )
 
