@@ -10,6 +10,7 @@ from __future__ import annotations
 import pandas as pd
 from tqdm import tqdm
 
+from manga_ocr_dev.data.process_text import normalize_text
 from manga_ocr_dev.env import DATA_SYNTHETIC_ROOT
 
 # CC-100 file stems per synth language (tried in order; first hit wins).
@@ -59,7 +60,7 @@ def export_lines(
             data = []
             for line in tqdm(file, desc=f"Creating package {package_count:04d} of {num_packages} ({lang})"):
                 id_count += 1
-                stripped_line = line.strip()
+                stripped_line = normalize_text(line)
                 # Skip lines that are too short to form meaningful text blocks
                 if len(stripped_line) <= 2:
                     continue

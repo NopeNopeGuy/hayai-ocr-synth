@@ -122,6 +122,64 @@ def test_full_render_with_background(tmp_path):
     assert max(img.shape) <= 600
 
 
+def _capture_background_kwargs(r):
+    """Wrap ``render_background`` so tests can inspect the crop controls."""
+    seen = []
+    original = r.render_background
+
+    def wrapper(img, **kwargs):
+        seen.append(kwargs)
+        return original(img, **kwargs)
+
+    r.render_background = wrapper
+    return seen
+
+
+def test_render_forces_bubble_and_tight(tmp_path):
+    """Per-sample ``draw_bubble`` / ``tight`` must reach the crop stage verbatim."""
+    r = _bg_renderer(tmp_path)
+    seen = _capture_background_kwargs(r)
+    np.random.seed(0)
+    r.render(["あいうえお"], dict(BASE_CSS, draw_bubble=True, tight=True))
+    assert seen[-1]["draw_bubble"] is True
+    assert seen[-1]["tight"] is True
+
+    np.random.seed(0)
+    r.render(["あいうえお"], dict(BASE_CSS, draw_bubble=False, tight=False))
+    assert seen[-1]["draw_bubble"] is False
+    assert seen[-1]["tight"] is False
+
+    np.random.seed(0)
+    r.render(["あいうえお"], dict(SFX_BASE, sfx_persp=0.0, draw_bubble=True, tight=False))
+    assert seen[-1]["draw_bubble"] is True
+    assert seen[-1]["tight"] is False
+
+
+def test_render_bubble_prob_is_honoured(tmp_path):
+    r = _bg_renderer(tmp_path)
+    seen = _capture_background_kwargs(r)
+    for _ in range(5):
+        np.random.seed(0)
+        r.render(["あいうえお"], dict(BASE_CSS, bubble_prob=0.0))
+        assert seen[-1]["draw_bubble"] is False
+        np.random.seed(0)
+        r.render(["あいうえお"], dict(BASE_CSS, bubble_prob=1.0))
+        assert seen[-1]["draw_bubble"] is True
+
+
+def test_render_sfx_defaults_to_no_bubble_and_tight(tmp_path):
+    r = _bg_renderer(tmp_path)
+    seen = _capture_background_kwargs(r)
+    np.random.seed(0)
+    r.render(["ドン"], dict(SFX_BASE, sfx_persp=0.0))
+    assert seen[-1]["draw_bubble"] is False
+    assert seen[-1]["tight"] is True
+
+    np.random.seed(0)
+    r.render(["あいうえお"], dict(BASE_CSS))
+    assert seen[-1]["tight"] is False
+
+
 IRREGULAR_NEUTRAL = {
     "irregular": True,
     "line_scale_min": 1.0,

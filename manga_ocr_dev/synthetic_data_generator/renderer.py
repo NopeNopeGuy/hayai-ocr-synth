@@ -875,9 +875,20 @@ class Renderer:
             _trim_native_memory()
 
         img, params = self.render_text(lines, override_css_params)
-        draw_bubble = None if not params.get("sfx") else False
+
+        # Crop controls are exposed through per-sample params so callers can force
+        # ``draw_bubble`` / ``tight`` instead of relying on the random defaults.
+        draw_bubble = params.get("draw_bubble", None)
+        if draw_bubble is not None:
+            draw_bubble = bool(draw_bubble)
+        elif params.get("sfx"):
+            draw_bubble = False
+        elif params.get("bubble_prob", None) is not None:
+            draw_bubble = bool(np.random.rand() < float(params["bubble_prob"]))
+
+        tight = bool(params.get("tight", bool(params.get("sfx"))))
         img, ink_box = self.render_background(
-            img, draw_bubble=draw_bubble, tight=bool(params.get("sfx")), return_ink_box=True
+            img, draw_bubble=draw_bubble, tight=tight, return_ink_box=True
         )
         if np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
             bite = TRUNC_INK_BITE_EM * float(params.get("font_size", 48))

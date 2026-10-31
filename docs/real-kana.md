@@ -447,6 +447,40 @@ in the same image (default 1.0 when the flag is on).
 | Separate scripts per stage | One CLI with resumable stages, disk-cached verifier calls, pinned dataset revision |
 | Browser-based rendering | Existing Pillow renderer; font is only replaced for kana |
 
+## Rechecking an existing bank with MiniCPM-OCR-Jev
+
+`tools/recheck_real_kana_jev.py` scores every glyph against its manifest label
+with ModelBest's `MiniCPM-OCR-Jev` endpoint.  The model only scores the existing
+candidate text; it does not re-recognise the glyph and never rewrites a label.
+Each request carries the glyph image and its kana, up to 64 glyphs at a time.
+
+```bash
+export JEV_API_KEY='...'
+
+# smoke test: encode 64 glyphs, call the API once, then stop
+python tools/recheck_real_kana_jev.py score --limit 64
+
+# score the whole bank (resumable; results go to <bank>/recheck/scores.jsonl)
+python tools/recheck_real_kana_jev.py score
+
+# distribution, per-label pass rates and a montage of the lowest scores
+python tools/recheck_real_kana_jev.py report --montage 300
+
+# build a filtered copy; source is untouched and glyphs are hardlinked
+python tools/recheck_real_kana_jev.py apply --min-score 0.5
+```
+
+The default bank is `/mnt/real-kana-final`; pass `--bank` for another one.
+`score` skips glyphs already scored, retries transport/429/5xx failures with
+backoff, and appends one JSONL record per glyph.  `apply` writes
+`recheck/bank-min<score>/` with the same layout (`manifest.jsonl` + `glyphs/`),
+so it can be used directly with `--kana_bank`; use `--copy` instead of
+hardlinks when the destination is on another filesystem.  The score is a
+quality signal for filtering, not a character-accuracy guarantee: inspect the
+`report` montage and per-label table before choosing a cutoff.  API keys are
+read from `JEV_API_KEY`, `--api-key-file` or `--api-key` and are never written
+to the output directory.
+
 ## Limitations
 
 - The repository ships an **empty** bank. Nothing is downloaded at render

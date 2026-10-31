@@ -1,6 +1,6 @@
 # Text corpus (`manga_ocr_dev/data/`)
 
-Package init re-exports the public surface (`manga_ocr_dev/data/__init__.py:1-25`): `export_dialogue, export_lines, clean_dialogue_line, clean_novel_text, detect_line_lang, iter_dialogue/novel/mixed_stream, split_novel_chapter`.
+Package init re-exports the public surface (`manga_ocr_dev/data/__init__.py:1-25`): `export_dialogue, export_lines, clean_dialogue_line, clean_novel_text, detect_line_lang, iter_dialogue_split, iter_dialogue/novel/mixed_stream, split_novel_chapter`.
 
 ## `process_text.py` (623 lines) — canonical exporter
 
@@ -9,6 +9,7 @@ Package init re-exports the public surface (`manga_ocr_dev/data/__init__.py:1-25
 Key API (`process_text.py`):
 
 - `clean_dialogue_line(text) -> str` — strips ASS override blocks `{...}`, HTML tags, speaker prefixes `Name:`, music notes `♪♫`, leading/trailing quotes/brackets; normalizes whitespace.
+- `normalize_text(text) -> str` — NFKC compatibility normalization (full-width Latin/digits/punctuation → ASCII), removes whitespace touching a CJK character on either side, then collapses remaining whitespace. Applied to every dialogue/novel/CC-100 line before packaging.
 - `clean_novel_text(text) -> str` — strips Aozora Bunko ruby `《...》`/`［...］` notes, HTML, headers/footers.
 - `split_novel_chapter(text, min_len=2, max_len=150, lang=None) -> list[str]` — quote-aware splitter: CJK on `。！？…` vs English on `.!?`+space; clamps length.
 - `class RollingDedup(window_size=50000): is_duplicate(text)` — rolling hash window.
@@ -31,6 +32,7 @@ CLI:
 python -m manga_ocr_dev.data.process_text --num_packages=10 --num_lines_in_each_package=100000
 python -m manga_ocr_dev.data.process_text --source_type=novel --num_packages=10
 python -m manga_ocr_dev.data.process_text --source_type=dialogue --dialogue_ratio 0.5
+python -m manga_ocr_dev.data.process_text --source_type=dialogue --dialogue_splits=anime_tv,drama_tv
 ```
 
 ## `process_dialogue.py` (82 lines) — dialogue convenience wrapper

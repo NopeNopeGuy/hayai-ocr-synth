@@ -2,10 +2,11 @@
 Process dialogue and novel datasets into line packages for synthetic manga OCR data generation.
 
 Supported datasets:
-1. OpenSubtitles Japanese (https://huggingface.co/datasets/Nan-Do/OpenSubtitlesJapanese)
-   - File: OpenSubtitles.parquet (the metadata/OA parquet files are not used)
-   - Columns: ID, BlockNum, InitTime, EndTime, Sentences (list of subtitle lines per block)
-   - Each element of ``Sentences`` is one subtitle line; a leading ``- `` speaker dash is removed.
+1. Japanese Dialogue Dataset
+   (https://huggingface.co/datasets/JustANormalTinkerer/Japanese-Dialogue-Dataset)
+   - Splits: anime_tv, anime_movie, drama_tv, drama_movie, unsorted
+   - Columns: dialogue (one cleaned subtitle line), source, category, source_file
+   - Already deduplicated and cleaned; each row is one utterance.
 2. Japanese Novels 23M (https://huggingface.co/datasets/OmniAICreator/Japanese-Novels-23M)
    - Configs: Hameln, Kakuyomu, Narou_NSFW, Narou_SFW, aozorabunko, novecomi, pixiv
    - Features: main_text (Narou_NSFW, Narou_SFW) or text (Hameln, Kakuyomu, aozorabunko, novecomi, pixiv)
@@ -20,6 +21,7 @@ import glob
 import random
 import re
 import sys
+import unicodedata
 from collections import deque
 from collections.abc import Generator, Iterator, Sequence
 from pathlib import Path
@@ -35,11 +37,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from manga_ocr_dev.env import DATA_SYNTHETIC_ROOT
 
-DEFAULT_DIALOGUE_DATASET = "Nan-Do/OpenSubtitlesJapanese"
-DEFAULT_DIALOGUE_DATA_FILE = "OpenSubtitles-2023-04-19.parquet"
-# Column names that may hold the subtitle lines. "Sentences" is the OpenSubtitlesJapanese
+DEFAULT_DIALOGUE_DATASET = "JustANormalTinkerer/Japanese-Dialogue-Dataset"
+DEFAULT_DIALOGUE_SPLITS = ("anime_tv", "anime_movie", "drama_tv", "drama_movie", "unsorted")
+# Column names that may hold dialogue lines. "dialogue" is the Japanese Dialogue Dataset
 # column; the rest are fallbacks for local files exported from older dialogue datasets.
-SUBTITLE_TEXT_FIELDS = ("Sentences", "sentences", "dialogue", "text", "line")
+DIALOGUE_TEXT_FIELDS = ("dialogue", "Sentences", "sentences", "text", "line")
 
 DEFAULT_NOVEL_DATASET = "OmniAICreator/Japanese-Novels-23M"
 DEFAULT_NOVEL_CONFIGS = (
@@ -69,6 +71,11 @@ RE_SENTENCE_DELIM_EN = re.compile(r"(?<=[.!?…])\s+")
 # regex Unicode-word semantics.
 RE_VALID_CHAR = re.compile(r"[\w\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]")
 RE_WHITESPACE = re.compile(r"\s+")
+# CJK ranges used by normalize_text: CJK Unified Ideographs, Ext A, Hiragana,
+# Katakana, and CJK Symbols/Punctuation.
+_CJK_CHAR = r"[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\u3000-\u303f]"
+# Whitespace touching a CJK character on either side is dropped.
+_RE_CJK_SPACE = re.compile(f"(?<={_CJK_CHAR})\\s+|\\s+(?={_CJK_CHAR})")
 # Leading speaker-change dash used in subtitles ("- 試して"). Not stripped when the dash is
 # part of a number or word, e.g. "-5度" keeps its minus sign.
 RE_SUBTITLE_DASH = re.compile(r"^[-－–—]+(?:\s+|(?=[^\d\s]))")
@@ -77,6 +84,21 @@ RE_SUBTITLE_DASH = re.compile(r"^[-－–—]+(?:\s+|(?=[^\d\s]))")
 RE_QUOTE_SPLIT = re.compile(r"(「[^「」]*」|『[^『』]*』)")
 _OPEN_TO_CLOSE_BRACKET = {"「": "」", "『": "』"}
 _CLOSE_TO_OPEN_BRACKET = {v: k for k, v in _OPEN_TO_CLOSE_BRACKET.items()}
+
+
+def normalize_text(text: str | None) -> str:
+    """Normalize a text line before rendering and labeling.
+
+    Applies NFKC compatibility normalization (full-width Latin letters, digits and
+    punctuation become ASCII), removes whitespace that touches a CJK character on
+    either side, then collapses any remaining whitespace.
+    """
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKC", str(text))
+    text = _RE_CJK_SPACE.sub("", text)
+    return RE_WHITESPACE.sub(" ", text).strip()
 
 
 def detect_line_lang(text: str) -> str:
@@ -206,8 +228,8 @@ def _split_long_quote(quote: str, min_len: int, sentence_split) -> list[str]:
 def _as_text_list(value) -> list[str]:
     """Return the non-empty strings held by a dataset cell.
 
-    A cell can be a plain string, a list of strings (OpenSubtitles ``Sentences``), or a
-    numpy array of strings when data comes from pandas/arrow.
+    A cell can be a plain string, a list of strings (e.g. old subtitle ``Sentences``
+    columns), or a numpy array of strings when data comes from pandas/arrow.
     """
     if value is None:
         return []
@@ -220,9 +242,9 @@ def _as_text_list(value) -> list[str]:
     return []
 
 
-def _subtitle_entries(row: dict) -> list[str]:
-    """Return the raw subtitle entries of one dataset row (one entry per subtitle line)."""
-    for field in SUBTITLE_TEXT_FIELDS:
+def _dialogue_entries(row: dict) -> list[str]:
+    """Return the raw dialogue entries of one dataset row."""
+    for field in DIALOGUE_TEXT_FIELDS:
         entries = _as_text_list(row.get(field))
         if entries:
             return entries
@@ -262,10 +284,8 @@ def clean_dialogue_line(text: str | None) -> str:
     # Subtitles often cut a quotation across blocks; drop the bracket that has no partner
     text = balance_quote_brackets(text)
 
-    # Normalize full-width spaces and collapse redundant spaces
-    text = text.replace("\u3000", " ")
-    text = RE_WHITESPACE.sub(" ", text).strip()
-    return text
+    # NFKC normalization + remove spaces touching CJK characters
+    return normalize_text(text)
 
 
 def clean_novel_text(text: str | None) -> str:
@@ -360,8 +380,7 @@ def split_novel_chapter(
     valid_lines: list[str] = []
     for l in lines:
         # Narrative fragments can still carry a bracket whose partner is in another paragraph
-        l = balance_quote_brackets(l)
-        l = RE_WHITESPACE.sub(" ", l).strip()
+        l = normalize_text(balance_quote_brackets(l))
         if len(l) >= min_len and RE_VALID_CHAR.search(l):
             valid_lines.append(l)
 
@@ -407,26 +426,25 @@ class RollingDedup:
         return False
 
 
-def iter_subtitle_lines(
+def iter_dialogue_lines(
     ds,
-    source: str,
+    source: str = "dialogue",
     min_len: int = 2,
     max_len: int = 200,
+    split: str | None = None,
 ) -> Generator[dict[str, str], None, None]:
-    """Yield one cleaned line per subtitle entry from an opened subtitle dataset.
+    """Yield one cleaned line per dialogue entry from an opened dialogue dataset.
 
-    Each dataset row is one subtitle block. Its subtitle list (``Sentences``) holds one
-    entry per on-screen line; an entry can still contain several lines joined by ASS
-    ``\\N`` markup or real newlines, which are split here.
+    The Japanese Dialogue Dataset already stores one cleaned utterance per row in the
+    ``dialogue`` column. Older or local exports can still carry subtitle blocks with
+    several entries or ASS ``\\N`` line breaks, which are split here.
     """
-    fallback_cnt = 0
-    for row in ds:
-        block_key = None
-        if row.get("ID") is not None and row.get("BlockNum") is not None:
-            block_key = f"{row['ID']}_{row['BlockNum']}"
+    for row_idx, row in enumerate(ds):
+        category = row.get("category") or split or source
+        row_source = f"dialogue_{category}" if not str(category).startswith("dialogue_") else str(category)
 
-        entry_cnt = 0
-        for entry in _subtitle_entries(row):
+        row_entry_cnt = 0
+        for entry in _dialogue_entries(row):
             for raw_line in RE_ASS_NEWLINE.sub("\n", entry).splitlines():
                 cleaned = clean_dialogue_line(raw_line)
                 if len(cleaned) < min_len or len(cleaned) > max_len:
@@ -434,13 +452,12 @@ def iter_subtitle_lines(
                 if not RE_VALID_CHAR.search(cleaned):
                     continue
 
-                entry_cnt += 1
-                if block_key is not None:
-                    line_id = f"{source}_{block_key}_{entry_cnt}"
-                else:
-                    fallback_cnt += 1
-                    line_id = f"{source}_{fallback_cnt}"
-                yield {"source": source, "id": line_id, "line": cleaned}
+                row_entry_cnt += 1
+                yield {
+                    "source": row_source,
+                    "id": f"{row_source}_{row_idx}_{row_entry_cnt}",
+                    "line": cleaned,
+                }
 
 
 def iter_novel_config(
@@ -475,15 +492,33 @@ def iter_novel_config(
                 }
 
 
+def iter_dialogue_split(
+    dataset_name: str = DEFAULT_DIALOGUE_DATASET,
+    split: str = "anime_tv",
+    streaming: bool = True,
+    min_len: int = 2,
+    max_len: int = 200,
+) -> Generator[dict[str, str], None, None]:
+    """Stream lines from one split of the Japanese Dialogue Dataset."""
+    from datasets import load_dataset
+
+    ds = load_dataset(dataset_name, split=split, streaming=streaming)
+    yield from iter_dialogue_lines(ds, source=split, min_len=min_len, max_len=max_len, split=split)
+
+
 def iter_dialogue_stream(
     dataset_name: str = DEFAULT_DIALOGUE_DATASET,
-    data_file: str = DEFAULT_DIALOGUE_DATA_FILE,
+    splits: str | Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
     streaming: bool = True,
     data_files: str | Sequence[str] | None = None,
     min_len: int = 2,
     max_len: int = 200,
 ) -> Generator[dict[str, str], None, None]:
-    """Stream subtitle lines from OpenSubtitlesJapanese or local files with low memory usage."""
+    """Stream dialogue lines from the Japanese Dialogue Dataset or local files.
+
+    Splits are read round-robin so exported packages mix anime and drama dialogue
+    instead of draining the largest split first.
+    """
     from datasets import load_dataset
 
     if data_files:
@@ -509,12 +544,36 @@ def iter_dialogue_stream(
         else:
             ds = load_dataset("parquet", data_files=resolved, split="train", streaming=streaming)
 
-        yield from iter_subtitle_lines(ds, source="dialogue_local", min_len=min_len, max_len=max_len)
+        yield from iter_dialogue_lines(ds, source="dialogue_local", min_len=min_len, max_len=max_len)
         return
 
-    # Only the subtitle table is read; the metadata and Open Assistant parquet files are skipped.
-    ds = load_dataset(dataset_name, data_files=data_file, split="train", streaming=streaming)
-    yield from iter_subtitle_lines(ds, source="dialogue_opensubtitles", min_len=min_len, max_len=max_len)
+    if isinstance(splits, str):
+        splits = [s.strip() for s in splits.split(",") if s.strip()]
+    if not splits:
+        raise ValueError("No dialogue splits configured")
+
+    iterators = []
+    for split in splits:
+        try:
+            ds = load_dataset(dataset_name, split=split, streaming=streaming)
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: could not load dialogue split '{split}': {e}", file=sys.stderr)
+            continue
+        iterators.append(iter_dialogue_lines(ds, source=split, min_len=min_len, max_len=max_len, split=split))
+
+    while iterators:
+        alive = []
+        for iterator in iterators:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                continue
+            except Exception as e:  # noqa: BLE001
+                print(f"Warning: dialogue split failed: {e}", file=sys.stderr)
+                continue
+            alive.append(iterator)
+            yield item
+        iterators = alive
 
 
 def iter_novel_stream(
@@ -613,7 +672,7 @@ def export_lines(
     start_package: int = 0,
     source_type: str = "both",
     dialogue_ratio: float = 0.5,
-    dialogue_data_file: str = DEFAULT_DIALOGUE_DATA_FILE,
+    dialogue_splits: str | Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
     novel_configs: Sequence[str] = DEFAULT_NOVEL_CONFIGS,
     streaming: bool = True,
     dialogue_dataset_name: str = DEFAULT_DIALOGUE_DATASET,
@@ -635,8 +694,8 @@ def export_lines(
     :param start_package: Index of first package (e.g. 0 creates 0000.csv). Default 0.
     :param source_type: Data source to use: 'both' (mixed), 'dialogue', or 'novel' / 'novels'.
     :param dialogue_ratio: Proportion of dialogue lines when source_type='both'. Default 0.5.
-    :param dialogue_data_file: Parquet file inside the OpenSubtitles dataset to read.
-        Default: 'OpenSubtitles.parquet'.
+    :param dialogue_splits: Splits of the Japanese Dialogue Dataset to stream.
+        Default: ('anime_tv', 'anime_movie', 'drama_tv', 'drama_movie', 'unsorted').
     :param novel_configs: Configs to use from Japanese-Novels-23M.
         Default: ('Narou_NSFW', 'Kakuyomu', 'Narou_SFW', 'Hameln', 'aozorabunko', 'novecomi', 'pixiv').
         Includes web novel sources (such as Narou_NSFW, Kakuyomu, Hameln).
@@ -674,7 +733,7 @@ def export_lines(
     if source_type in {"dialogue", "subtitles"}:
         stream = iter_dialogue_stream(
             dataset_name=dialogue_dataset_name,
-            data_file=dialogue_data_file,
+            splits=dialogue_splits,
             streaming=streaming,
             data_files=dialogue_data_dir,
             min_len=min_len,
@@ -692,7 +751,7 @@ def export_lines(
     elif source_type in {"both", "mixed", "all"}:
         d_stream = iter_dialogue_stream(
             dataset_name=dialogue_dataset_name,
-            data_file=dialogue_data_file,
+            splits=dialogue_splits,
             streaming=streaming,
             data_files=dialogue_data_dir,
             min_len=min_len,
@@ -743,8 +802,9 @@ def export_lines(
             line_text = item["line"]
             if strip_leading_quotes:
                 line_text = strip_leading_quote(line_text)
-                if len(line_text) < min_len or not RE_VALID_CHAR.search(line_text):
-                    continue
+            line_text = normalize_text(line_text)
+            if len(line_text) < min_len or not RE_VALID_CHAR.search(line_text):
+                continue
             if keep_lang is not None and detect_line_lang(line_text) != keep_lang:
                 continue
             if dedup.is_duplicate(line_text):

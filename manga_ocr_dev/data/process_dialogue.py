@@ -1,7 +1,8 @@
 """Process Japanese dialogue datasets into line packages for synthetic manga OCR data generation.
 
 Extracts cleaned dialogue lines from:
-- Nan-Do/OpenSubtitlesJapanese (OpenSubtitles.parquet: one row per subtitle block)
+- JustANormalTinkerer/Japanese-Dialogue-Dataset (splits: anime_tv, anime_movie,
+  drama_tv, drama_movie, unsorted; one cleaned utterance per row)
 - Optional novel sources or mixed dialogue/novel streams via `--source_type`.
 """
 
@@ -19,8 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from manga_ocr_dev.data.process_text import (
-    DEFAULT_DIALOGUE_DATA_FILE,
     DEFAULT_DIALOGUE_DATASET,
+    DEFAULT_DIALOGUE_SPLITS,
     DEFAULT_NOVEL_CONFIGS,
     DEFAULT_NOVEL_DATASET,
     export_lines,
@@ -32,7 +33,7 @@ def export_dialogue(
     num_packages: int = 10,
     start_package: int = 0,
     source_type: str = "dialogue",
-    dialogue_data_file: str = DEFAULT_DIALOGUE_DATA_FILE,
+    dialogue_splits: str | Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
     novel_configs: Sequence[str] = DEFAULT_NOVEL_CONFIGS,
     dialogue_ratio: float = 0.5,
     streaming: bool = True,
@@ -59,7 +60,7 @@ def export_dialogue(
         start_package=start_package,
         source_type=source_type,
         dialogue_ratio=dialogue_ratio,
-        dialogue_data_file=dialogue_data_file,
+        dialogue_splits=dialogue_splits,
         novel_configs=novel_configs,
         streaming=streaming,
         dialogue_dataset_name=dialogue_dataset_name,

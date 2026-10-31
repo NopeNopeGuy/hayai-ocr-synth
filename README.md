@@ -110,6 +110,33 @@ python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --max_
 python -m manga_ocr_dev.synthetic_data_generator.run_generate --package 0 --split sfx --n_random 50000 --max_workers 16
 ```
 
+### 6. Append to the `hayai-synth-dataset` Hub dataset
+
+`tools/append_hayai_synth.py` generates crops with the crop/line-source controls
+below and uploads them as append-only parquet shards that match the existing
+`japanese` / `sfx` / `handwritten` schema:
+
+```bash
+# Generate 5k dialogue crops with forced speech bubbles
+python tools/append_hayai_synth.py generate \
+  --split japanese --preset dialogue_bubble --lines hf:novel:Narou_NSFW \
+  --n-images 5000 --out-dir ~/hayai_append --run-id my-run
+
+# Validate, then upload only the new shards
+python tools/append_hayai_synth.py validate \
+  --out-dir ~/hayai_append --split japanese --run-id my-run
+python tools/append_hayai_synth.py upload \
+  --out-dir ~/hayai_append --split japanese --run-id my-run \
+  --repo-id JustANormalTinkerer/hayai-synth-dataset
+```
+
+`--preset` accepts `auto`, `dialogue`, `dialogue_bubble`, `dialogue_flat`,
+`dialogue_tight`, `handwritten`, `sfx`, `mixed`, and `custom`; `--lines` accepts
+a local CSV/parquet/JSONL/TXT path, `hf:dialogue[:splits]`, `hf:novel[:configs]`,
+`random`, or `sfx`. For a step-by-step Kaggle notebook with input auto-discovery
+and preview, see [`kaggle/append_hayai_synth.ipynb`](kaggle/append_hayai_synth.ipynb)
+and [`kaggle/README.md`](kaggle/README.md).
+
 ---
 
 ## Python API

@@ -8,7 +8,10 @@ from manga_ocr_dev.data.process_text import (
     clean_dialogue_line,
     clean_novel_text,
     export_lines,
+    iter_dialogue_split,
+    iter_dialogue_stream,
     iter_mixed_stream,
+    normalize_text,
     split_novel_chapter,
 )
 
@@ -29,17 +32,30 @@ def test_clean_dialogue_line_subtitles():
     # Music notes
     assert clean_dialogue_line("♪ ラララ ♪") == "ラララ"
     # Outer quotes stripped
-    assert clean_dialogue_line('"できない"では つまらない') == '"できない"では つまらない'
+    assert clean_dialogue_line('"できない"では つまらない') == '"できない"ではつまらない'
     assert clean_dialogue_line('"はい、分かりました"') == "はい、分かりました"
     assert clean_dialogue_line("“Yes, sir!”") == "Yes, sir!"
     assert clean_dialogue_line("'Okay'") == "Okay"
-    # Japanese fullwidth space normalization
-    assert clean_dialogue_line("0.3秒の照射で\u3000網膜を損傷させ") == "0.3秒の照射で 網膜を損傷させ"
+    # NFKC + CJK spacing normalization
+    assert clean_dialogue_line("0.3秒の照射で\u3000網膜を損傷させ") == "0.3秒の照射で網膜を損傷させ"
+    assert clean_dialogue_line("ＡＢＣ１２３") == "ABC123"
     # English & Japanese mixed
-    assert clean_dialogue_line("OK、了解した！") == "OK、了解した！"
+    assert clean_dialogue_line("OK、了解した！") == "OK、了解した!"
     # None or empty
     assert clean_dialogue_line(None) == ""
     assert clean_dialogue_line("") == ""
+
+
+def test_normalize_text():
+    # NFKC converts full-width Latin/digits/punctuation to ASCII
+    assert normalize_text("ＡＢＣ１２３") == "ABC123"
+    assert normalize_text("こんにちは、世界！") == "こんにちは、世界!"
+    # Whitespace touching CJK characters is removed
+    assert normalize_text("これは　テスト です") == "これはテストです"
+    assert normalize_text("0.3秒の照射で 網膜を損傷させ") == "0.3秒の照射で網膜を損傷させ"
+    # Other whitespace is collapsed, not removed
+    assert normalize_text("hello   world") == "hello world"
+    assert normalize_text(None) == ""
 
 
 def test_clean_novel_text_aozora():
@@ -63,7 +79,7 @@ def test_split_novel_chapter():
     lines = split_novel_chapter(chapter, min_len=2, max_len=100)
     assert len(lines) >= 4
     # Dialogues extracted
-    assert any("汝らは永遠に幸せであることをここに誓いますか？" in l for l in lines)
+    assert any("汝らは永遠に幸せであることをここに誓いますか?" in l for l in lines)
     assert any("はい、誓います" in l for l in lines)
     assert any("Yes, I do!" in l for l in lines)
     # Separator '-------------------' should be skipped
@@ -84,6 +100,64 @@ def test_rolling_dedup():
     assert not dedup.is_duplicate("line5")
     # Now line2 should have been evicted
     assert not dedup.is_duplicate("line2")
+
+
+def test_iter_dialogue_split_reads_dialogue_column(monkeypatch):
+    import datasets
+
+    class FakeDataset:
+        def __iter__(self):
+            yield {
+                "dialogue": "違う 違う！ そうじゃない！！",
+                "source": "Show",
+                "category": "anime_tv",
+                "source_file": "show.ass",
+            }
+            yield {"dialogue": "   ", "source": "Show", "category": "anime_tv", "source_file": "show.ass"}
+
+    calls = {}
+
+    def fake_load_dataset(name, split=None, streaming=True):
+        calls.update(name=name, split=split, streaming=streaming)
+        return FakeDataset()
+
+    monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+
+    rows = list(iter_dialogue_split("JustANormalTinkerer/Japanese-Dialogue-Dataset", "anime_tv"))
+    assert calls == {"name": "JustANormalTinkerer/Japanese-Dialogue-Dataset", "split": "anime_tv", "streaming": True}
+    assert rows == [
+        {
+            "source": "dialogue_anime_tv",
+            "id": "dialogue_anime_tv_0_1",
+            "line": "違う違う!そうじゃない!!",
+        }
+    ]
+
+
+def test_iter_dialogue_stream_round_robins_splits(monkeypatch):
+    import datasets
+
+    class FakeDataset:
+        def __init__(self, split):
+            self.split = split
+
+        def __iter__(self):
+            for i in range(2):
+                yield {"dialogue": f"{self.split} {i}", "category": self.split}
+
+    def fake_load_dataset(name, split=None, streaming=True):
+        return FakeDataset(split)
+
+    monkeypatch.setattr(datasets, "load_dataset", fake_load_dataset)
+
+    rows = list(iter_dialogue_stream(splits=["anime_tv", "drama_tv"]))
+    assert [row["line"] for row in rows] == ["anime_tv 0", "drama_tv 0", "anime_tv 1", "drama_tv 1"]
+    assert [row["source"] for row in rows] == [
+        "dialogue_anime_tv",
+        "dialogue_drama_tv",
+        "dialogue_anime_tv",
+        "dialogue_drama_tv",
+    ]
 
 
 def test_iter_mixed_stream():
@@ -129,4 +203,4 @@ def test_export_lines_local_mock():
         assert list(df.columns) == ["source", "id", "line"]
         assert len(df) == 3
         # Check that lines contain cleaned text
-        assert any("こんにちは、世界！" in str(l) for l in df["line"])
+        assert any("こんにちは、世界!" in str(l) for l in df["line"])

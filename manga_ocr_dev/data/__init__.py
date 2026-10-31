@@ -6,9 +6,11 @@ from manga_ocr_dev.data.process_text import (
     clean_novel_text,
     detect_line_lang,
     export_lines,
+    iter_dialogue_split,
     iter_dialogue_stream,
     iter_mixed_stream,
     iter_novel_stream,
+    normalize_text,
     split_novel_chapter,
 )
 
@@ -18,8 +20,10 @@ __all__ = [
     "detect_line_lang",
     "export_dialogue",
     "export_lines",
+    "iter_dialogue_split",
     "iter_dialogue_stream",
     "iter_mixed_stream",
     "iter_novel_stream",
+    "normalize_text",
     "split_novel_chapter",
 ]

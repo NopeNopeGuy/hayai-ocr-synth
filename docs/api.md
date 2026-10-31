@@ -38,8 +38,8 @@ img_bgra, params = r.render_text(["水平線の向こう側"],
 
 ```python
 from manga_ocr_dev.data import (export_dialogue, export_lines, clean_dialogue_line,
-    clean_novel_text, detect_line_lang, iter_dialogue_stream, iter_mixed_stream,
-    iter_novel_stream, split_novel_chapter)
+    clean_novel_text, detect_line_lang, iter_dialogue_split, iter_dialogue_stream,
+    iter_mixed_stream, iter_novel_stream, normalize_text, split_novel_chapter)
 ```
 
 ## CLIs (all `fire`)
