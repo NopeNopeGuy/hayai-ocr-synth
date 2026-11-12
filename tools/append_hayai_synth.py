@@ -504,10 +504,25 @@ class Engine:
         if not text:
             return str(random.choice(self.hand_fonts))
         try:
-            coverage = self.font_map.coverage(set(text))
+            import numpy as np
+
+            chars = {c for c in text if not c.isspace()}
+            if not chars:
+                return str(random.choice(self.hand_fonts))
+            bits = self.font_map.bits[self._hand_idx]
+            extra = self.font_map.extra
+            total = np.zeros(len(self._hand_idx), dtype=np.float32)
+            for ch in chars:
+                cp = ord(ch)
+                if cp < 0x10000:
+                    total += (bits[:, cp >> 3] >> (cp & 7)) & 1
+                else:
+                    for j, idx in enumerate(self._hand_idx):
+                        if ch in extra.get(idx, ""):
+                            total[j] += 1.0
+            values = total / len(chars)
         except Exception:  # noqa: BLE001
             return None
-        values = coverage[self._hand_idx]
         best = float(values.max()) if len(values) else 0.0
         if best < 0.85:
             # Let the generator pick a font that covers the line instead of

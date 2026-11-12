@@ -191,6 +191,7 @@ class SyntheticDataGenerator:
             font_path = override_css_params["font_path"]
             lines = [self.add_random_furigana(line, word_prob, vocab, font_path=font_path) for line in lines]
 
+        override_css_params["_skip_tofu_check"] = True
         img, params = self.renderer.render(lines, override_css_params)
         params["lang"] = lang
         return img, text_gt, params
@@ -425,6 +426,7 @@ class SyntheticDataGenerator:
             lines = [sfx_text[:cut], sfx_text[cut:]]
         text_gt = "\n".join(lines)
 
+        override_css_params["_skip_tofu_check"] = True
         img, params = self.renderer.render(lines, override_css_params)
         params["lang"] = lang
         return img, text_gt, params

@@ -313,7 +313,7 @@ _NAMED_COLORS = {
 _FONT_CACHE_MAX = 256
 _LARGE_FONT_BYTES = 256 * (1 << 20)  # 25 MB: evict giant fonts as soon as sample switches
 _BG_IMAGE_CACHE = OrderedDict()
-_BG_IMAGE_CACHE_MAX = 2048
+_BG_IMAGE_CACHE_MAX = 512
 
 
 def _read_bg_cached(path: str):
@@ -324,8 +324,8 @@ def _read_bg_cached(path: str):
     img = cv2.imread(path, cv2.IMREAD_COLOR)
     if img is not None:
         h, w = img.shape[:2]
-        if max(h, w) > 1200:
-            scale = 1200.0 / max(h, w)
+        if max(h, w) > 800:
+            scale = 800.0 / max(h, w)
             img = cv2.resize(img, (max(8, int(w * scale)), max(8, int(h * scale))), interpolation=cv2.INTER_AREA)
         _BG_IMAGE_CACHE[path] = img
         while len(_BG_IMAGE_CACHE) > _BG_IMAGE_CACHE_MAX:
@@ -1018,8 +1018,10 @@ class Renderer:
         irregular = bool(params.get("irregular", False)) and not sfx
         pad = max(stroke_size, 3 * shadow_size, 2 if params.get("hollow") else 0, 0) + MIN_PAD
 
+        skip_tofu = bool(params.pop("_skip_tofu_check", False))
         parsed = [_parse_line(line) for line in lines]
-        _assert_no_tofu(parsed, font_path)
+        if not skip_tofu:
+            _assert_no_tofu(parsed, font_path)
 
         if sfx:
             width, height, ops = self._layout_sfx(
@@ -2452,7 +2454,7 @@ class Renderer:
             )
 
             bh, bw = bubble.shape[:2]
-            if max(bh, bw) > 300:
+            if max(bh, bw) > 128:
                 small_bubble = cv2.resize(bubble, (bw // 2, bh // 2), interpolation=cv2.INTER_NEAREST)
                 small_t = [A.ElasticTransform(alpha=alpha / 2.0, sigma=sigma / 2.0, p=0.8)]
                 warped = A.Compose(small_t)(image=small_bubble)["image"]
