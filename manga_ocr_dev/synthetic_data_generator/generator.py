@@ -1,3 +1,4 @@
+import os
 import re
 import unicodedata
 
@@ -5,7 +6,7 @@ import budoux
 import numpy as np
 import pandas as pd
 
-from manga_ocr_dev.env import ASSETS_PATH
+from manga_ocr_dev.env import ASSETS_PATH, FONTS_ROOT
 from manga_ocr_dev.synthetic_data_generator.lang import (
     COMMON_HAN_FREQ,
     DIALOGUE_PUNCT,
@@ -106,6 +107,23 @@ class SyntheticDataGenerator:
         # Precompute NumPy boolean masks once instead of rebuilding per sample
         labels_arr = self.fonts_df.label.to_numpy()
         self._is_manga_mask = labels_arr != "omit"
+
+        if FONTS_ROOT.is_dir():
+            existing_set = {
+                os.path.join(root, f)
+                for root, _, files in os.walk(FONTS_ROOT)
+                for f in files
+                if f.lower().endswith((".ttf", ".otf", ".ttc"))
+            }
+            if 0 < len(existing_set) < len(self.font_map.paths):
+                exists_mask = np.fromiter(
+                    (p in existing_set for p in self.font_map.paths),
+                    dtype=bool,
+                    count=len(self.font_map.paths),
+                )
+                if exists_mask.any():
+                    self._is_manga_mask &= exists_mask
+
         self._label_masks = {lbl: (labels_arr == lbl) for lbl in self.fonts_df.label.unique()}
         self._num_chars_arr = self.fonts_df.num_chars.to_numpy()
 

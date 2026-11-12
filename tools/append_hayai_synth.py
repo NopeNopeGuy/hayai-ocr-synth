@@ -583,11 +583,23 @@ def _worker_generate(job: tuple) -> dict:
 
 def _hand_fonts(lang: str | None = None) -> list[str]:
     from manga_ocr_dev.synthetic_data_generator.utils import get_font_meta, get_font_profile
+    from manga_ocr_dev.env import FONTS_ROOT
+
+    existing_set = None
+    if FONTS_ROOT.is_dir():
+        existing_set = {
+            os.path.join(root, f)
+            for root, _, files in os.walk(FONTS_ROOT)
+            for f in files
+            if f.lower().endswith((".ttf", ".otf", ".ttc"))
+        }
 
     _, font_map = get_font_meta()
     paths = []
     norm_lang = str(lang).lower().strip() if lang else None
     for path in font_map.paths:
+        if existing_set is not None and len(existing_set) < len(font_map.paths) and path not in existing_set:
+            continue
         profile = get_font_profile(path)
         if profile.get("font_type") == "handwritten" and profile.get("is_manga", True):
             if norm_lang:
@@ -604,18 +616,33 @@ def _hand_fonts(lang: str | None = None) -> list[str]:
     return paths
 
 
-def _check_font_root(font_map) -> None:
+def _check_font_root(font_map, lang: str | None = None) -> None:
     if not font_map.paths:
         raise RuntimeError("fonts.csv is empty: run scan_fonts.py first")
-    step = max(1, len(font_map.paths) // 400)
-    sample = font_map.paths[::step][:400]
-    missing = sum(not Path(path).is_file() for path in sample)
-    if missing > len(sample) * 0.5:
+
+    from manga_ocr_dev.env import FONTS_ROOT
+
+    existing_set = set()
+    if FONTS_ROOT.is_dir():
+        for root, _, files in os.walk(FONTS_ROOT):
+            for f in files:
+                if f.lower().endswith((".ttf", ".otf", ".ttc")):
+                    existing_set.add(os.path.join(root, f))
+
+    if not existing_set:
         raise RuntimeError(
-            f"{missing}/{len(sample)} sampled font files are missing under FONTS_ROOT. "
-            "Point --fonts-root at the Kaggle input that preserves the fonts.csv relative layout, "
-            "or rescan fonts with `python -m manga_ocr_dev.synthetic_data_generator.scan_fonts`."
+            f"No font files (.ttf, .otf, .ttc) found under FONTS_ROOT ({FONTS_ROOT}). "
+            "Check that fonts were downloaded to the target directory."
         )
+
+    matched = sum(1 for p in font_map.paths if p in existing_set)
+    if matched == 0:
+        raise RuntimeError(
+            f"Found {len(existing_set)} font files under {FONTS_ROOT}, but none matched fonts.csv paths. "
+            "Ensure the directory layout matches fonts.csv (e.g. Korean/, Chinese_Additions/, Latin_Comic/)."
+        )
+
+    print(f"Font validation passed: {matched} / {len(existing_set)} fonts available and recognized.")
 
 
 def _cfg_from_args(args: argparse.Namespace) -> dict:
@@ -689,7 +716,7 @@ def _prepare_cfg(cfg: dict) -> dict:
     hand_fonts = _hand_fonts(cfg.get("language"))
     cfg["hand_fonts"] = hand_fonts
     _, font_map = get_font_meta()
-    _check_font_root(font_map)
+    _check_font_root(font_map, lang=cfg.get("language"))
 
     if cfg["real_kana"] != "false" and cfg.get("kana_bank"):
         manifest = Path(cfg["kana_bank"]) / "manifest.jsonl"
