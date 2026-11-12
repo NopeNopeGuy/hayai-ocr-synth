@@ -14,7 +14,8 @@ ASSETS_PATH = Path(
 ).expanduser()
 
 # Root directory containing Japanese TrueType / OpenType font collections.
-FONTS_ROOT = Path(os.environ.get("FONTS_ROOT", Path.home() / "data" / "jp_fonts")).expanduser()
+_DEFAULT_FONTS = Path("/mnt/data/jp_fonts") if Path("/mnt/data/jp_fonts").is_dir() else (Path.home() / "data" / "jp_fonts")
+FONTS_ROOT = Path(os.environ.get("FONTS_ROOT", _DEFAULT_FONTS)).expanduser()
 
 # Destination directory for generated synthetic dataset packages (img/, lines/, meta/).
 DATA_SYNTHETIC_ROOT = Path(
@@ -29,8 +30,13 @@ BACKGROUND_DIR = Path(
     os.environ.get("BACKGROUND_DIR", Path.home() / "data" / "manga" / "Manga109s" / "background")
 ).expanduser()
 
+_DEFAULT_BG_ANIMETEXT = (
+    Path("/mnt/data/manga/AnimeText_background")
+    if Path("/mnt/data/manga/AnimeText_background").is_dir()
+    else (Path.home() / "data" / "manga" / "AnimeText_background")
+)
 BACKGROUND_ANIMETEXT_DIR = Path(
-    os.environ.get("BACKGROUND_ANIMETEXT_DIR", Path.home() / "data" / "manga" / "AnimeText_background")
+    os.environ.get("BACKGROUND_ANIMETEXT_DIR", _DEFAULT_BG_ANIMETEXT)
 ).expanduser()
 
 # Manga109-s dataset root directory.

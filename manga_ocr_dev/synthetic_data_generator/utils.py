@@ -238,6 +238,23 @@ def get_font_meta():
 
                 with open(cache_file, "rb") as f:
                     _GLOBAL_FONT_META = pickle.load(f)
+                df, fm = _GLOBAL_FONT_META
+                if len(df) > 0:
+                    first_p = str(df["font_path"].iloc[0])
+                    expected_prefix = str(FONTS_ROOT)
+                    if not first_p.startswith(expected_prefix) or not Path(first_p).exists():
+                        known_prefixes = ("完整包", "mayo", "精简包", "Latin_Comic", "Korean", "Chinese_Additions")
+                        def _to_current_root(p):
+                            p_str = str(p)
+                            for k in known_prefixes:
+                                idx = p_str.find(k)
+                                if idx != -1:
+                                    return str(FONTS_ROOT / p_str[idx:])
+                            return str(FONTS_ROOT / Path(p_str).name)
+                        df["font_path"] = df["font_path"].apply(_to_current_root)
+                        fm.paths = [_to_current_root(p) for p in fm.paths]
+                        fm.index = {p: i for i, p in enumerate(fm.paths)}
+                        _GLOBAL_FONT_META = (df, fm)
                 return _GLOBAL_FONT_META
         except Exception:  # noqa: BLE001
             pass

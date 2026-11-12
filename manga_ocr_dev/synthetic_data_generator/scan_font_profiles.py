@@ -278,6 +278,7 @@ def classify_font(rel_path: str) -> str:
         "klee", "kafu", "marker", "penji", "tegaki", "미생", "그날오후", "ownglyph",
         "gaegu", "gamjaflower", "cutefont", "himelody", "nanumpen", "静蕾", "显仁",
         "黑板报", "下午茶", "手札", "火柴", "doodle", "handwrite", "손글씨",
+        "senty", "chalk", "diary", "fountainpen", "대충쓴", "일기", "연우체", "griun", "hakgyo",
         "caveat", "architectsdaughter", "gochihand", "kalam", "indieflower",
         "patrickhand", "stanhand", "sketchpad", "shorthand", "flat earth scribe",
     ]):

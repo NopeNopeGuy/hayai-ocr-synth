@@ -119,3 +119,25 @@ so they override the defaults in `manga_ocr_dev/env.py`:
   generation skips already-written source lines and the upload step skips
   shards already present on the Hub.
 - Use a fresh `RUN_ID` for a new batch so shard names cannot collide.
+
+---
+
+# Kaggle / Colab: Multilingual Synthetic OCR (`multilingual_synth.ipynb`)
+
+`multilingual_synth.ipynb` extends synthetic generation to **Chinese (`zh`)**,
+**Korean (`ko`)**, **English (`en`)**, and **Japanese (`ja`)**.
+
+It works seamlessly on **Google Colab**, **Kaggle**, and **local workstations** (`/mnt/data`):
+
+1. **Fonts**:
+   - Priority 1: `/mnt/data/jp_fonts` (local dev machine)
+   - Priority 2: `/kaggle/input/...` (attached Kaggle dataset)
+   - Priority 3: Streaming/selective download from private Hugging Face repo [`JustANormalTinkerer/manga-ocr-multilingual-fonts`](https://huggingface.co/datasets/JustANormalTinkerer/manga-ocr-multilingual-fonts) (downloads only the language folder needed for the active run: `Chinese_Additions`, `Korean`, `Latin_Comic`, or `精简包`).
+2. **Backgrounds**:
+   - Priority 1: `/mnt/data/manga/AnimeText_background` (local)
+   - Priority 2: Streaming from [`deepghs/AnimeText`](https://huggingface.co/datasets/deepghs/AnimeText) on the fly (masks text boxes and generates clean crops + `manifest.csv` automatically).
+3. **Upload & Splits**:
+   - Configurable split names (e.g. `chinese`, `chinese_sfx`, `korean`, `korean_sfx`, `english`, `english_sfx`).
+   - Generates Parquet shards with schema `(image, transcription, language, source, image_id, vertical)`.
+   - Append-only upload to any Hugging Face dataset (e.g. `JustANormalTinkerer/hayai-synth-multilingual`).
+

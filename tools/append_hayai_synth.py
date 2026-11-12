@@ -60,7 +60,17 @@ if str(REPO_ROOT) not in sys.path:
 DEFAULT_REPO_ID = "JustANormalTinkerer/hayai-synth-dataset"
 DEFAULT_DIALOGUE_DATASET = "JustANormalTinkerer/Japanese-Dialogue-Dataset"
 DEFAULT_NOVEL_DATASET = "OmniAICreator/Japanese-Novels-23M"
-SPLITS = ("japanese", "sfx", "handwritten")
+SPLITS = (
+    "japanese",
+    "sfx",
+    "handwritten",
+    "chinese",
+    "chinese_sfx",
+    "korean",
+    "korean_sfx",
+    "english",
+    "english_sfx",
+)
 PRESETS = (
     "auto",
     "dialogue",
@@ -76,6 +86,12 @@ AUTO_PRESET = {
     "japanese": "dialogue",
     "sfx": "sfx",
     "handwritten": "handwritten",
+    "chinese": "dialogue",
+    "chinese_sfx": "sfx",
+    "korean": "dialogue",
+    "korean_sfx": "sfx",
+    "english": "dialogue",
+    "english_sfx": "sfx",
 }
 _ENGINE = None
 
@@ -282,7 +298,7 @@ def _iter_text_items(cfg: dict) -> Iterator[dict]:
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_DIALOGUE_DATASET,
                 splits=splits,
                 streaming=True,
-                min_len=2,
+                min_len=1,
                 max_len=int(cfg["max_line_len"]),
             )
             return
@@ -294,11 +310,32 @@ def _iter_text_items(cfg: dict) -> Iterator[dict]:
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_NOVEL_DATASET,
                 configs=configs,
                 streaming=True,
-                min_len=2,
+                min_len=1,
                 max_len=int(cfg["max_line_len"]),
             )
             return
-        raise ValueError("--lines hf:... must be hf:dialogue[:splits] or hf:novel[:configs]")
+        if spec.startswith("chinese_webnovel") or spec == "zh":
+            from tools.fetch_multilingual_lines import stream_chinese_lines
+
+            for idx, line in enumerate(stream_chinese_lines(limit=1000000)):
+                yield {"source": "wdndev_webnovel_chinese", "id": f"zh_webnovel_{idx}", "line": line}
+            return
+        if spec.startswith("english_discord") or spec == "en":
+            from tools.fetch_multilingual_lines import stream_english_lines
+
+            for idx, line in enumerate(stream_english_lines(limit=1000000)):
+                yield {"source": "mookiezi_discord_dialogues", "id": f"en_discord_{idx}", "line": line}
+            return
+        if spec.startswith("korean") or spec == "ko":
+            from tools.fetch_multilingual_lines import stream_korean_lines
+
+            for idx, line in enumerate(stream_korean_lines(limit=1000000)):
+                yield {"source": "korean_wiki_dialogue", "id": f"ko_line_{idx}", "line": line}
+            return
+        raise ValueError(
+            "--lines hf:... must be hf:dialogue[:splits], hf:novel[:configs], "
+            "hf:chinese_webnovel, hf:english_discord, or hf:korean"
+        )
 
     yield from _iter_local_lines(
         path=lines,
@@ -544,14 +581,25 @@ def _worker_generate(job: tuple) -> dict:
         return {"error": traceback.format_exc(), "image_id": job[4], "index": job[0]}
 
 
-def _hand_fonts():
+def _hand_fonts(lang: str | None = None) -> list[str]:
     from manga_ocr_dev.synthetic_data_generator.utils import get_font_meta, get_font_profile
 
     _, font_map = get_font_meta()
     paths = []
+    norm_lang = str(lang).lower().strip() if lang else None
     for path in font_map.paths:
         profile = get_font_profile(path)
         if profile.get("font_type") == "handwritten" and profile.get("is_manga", True):
+            if norm_lang:
+                hint = profile.get("lang_hint", "")
+                if norm_lang == "ja" and hint not in ("ja", "cjk", ""):
+                    continue
+                elif norm_lang == "ko" and hint not in ("ko", "cjk"):
+                    continue
+                elif norm_lang == "zh" and hint not in ("zh", "cjk"):
+                    continue
+                elif norm_lang == "en" and hint not in ("en",):
+                    continue
             paths.append(path)
     return paths
 
@@ -573,7 +621,12 @@ def _check_font_root(font_map) -> None:
 def _cfg_from_args(args: argparse.Namespace) -> dict:
     preset = args.preset
     if preset == "auto":
-        preset = AUTO_PRESET[args.split]
+        if "sfx" in args.split:
+            preset = "sfx"
+        elif "handwritten" in args.split:
+            preset = "handwritten"
+        else:
+            preset = AUTO_PRESET.get(args.split, "dialogue")
     if preset == "custom" and not args.override_json:
         raise SystemExit("--preset custom requires --override-json")
 
@@ -633,7 +686,7 @@ def _prepare_cfg(cfg: dict) -> dict:
 
     background_df = _background_df_from_cfg(cfg)
     cfg["background_df"] = background_df
-    hand_fonts = _hand_fonts()
+    hand_fonts = _hand_fonts(cfg.get("language"))
     cfg["hand_fonts"] = hand_fonts
     _, font_map = get_font_meta()
     _check_font_root(font_map)
@@ -954,8 +1007,9 @@ def validate_shards(files: Sequence[Path], expect_rows: int | None = None) -> di
                 raise ValueError(f"{path}: image.path mismatch in {row.get('image_id')}")
             if not str(row.get("transcription") or "").strip():
                 raise ValueError(f"{path}: empty transcription in {row.get('image_id')}")
-            if row.get("language") != "ja":
-                raise ValueError(f"{path}: language={row.get('language')!r} in {row.get('image_id')}")
+            lang = row.get("language")
+            if lang not in ("ja", "zh", "ko", "en"):
+                raise ValueError(f"{path}: unsupported language={lang!r} in {row.get('image_id')}")
             if not isinstance(row.get("vertical"), bool):
                 raise TypeError(f"{path}: vertical is not bool in {row.get('image_id')}")
             image_id = row.get("image_id")
@@ -1064,15 +1118,11 @@ def cmd_update_card(args: argparse.Namespace) -> int:
     for spec in args.add or []:
         name, raw = spec.split("=", 1)
         name = name.strip()
-        if name not in SPLITS:
-            raise SystemExit(f"unknown split in --add: {name}")
         counts[name] = counts.get(name, 0) + int(raw)
         added[name] = int(raw)
     for spec in args.set or []:
         name, raw = spec.split("=", 1)
         name = name.strip()
-        if name not in SPLITS:
-            raise SystemExit(f"unknown split in --set: {name}")
         counts[name] = int(raw)
 
     if args.wait and added:
@@ -1124,7 +1174,7 @@ def cmd_update_card(args: argparse.Namespace) -> int:
 
 
 def _add_generate_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--split", required=True, choices=SPLITS, help="target dataset split / shard prefix")
+    parser.add_argument("--split", required=True, help="target dataset split / shard prefix")
     parser.add_argument("--preset", default="auto", choices=PRESETS, help="crop kind (default: auto by split)")
     parser.add_argument("--n-images", type=int, default=5000, help="number of crops (use -1 to drain the line source)")
     parser.add_argument("--rows-per-shard", type=int, default=5000, help="rows per parquet shard (existing shards use 5000)")
@@ -1193,7 +1243,7 @@ def build_parser() -> argparse.ArgumentParser:
     val = sub.add_parser("validate", help="validate shard schema, JPEG bytes and labels")
     val.add_argument("--shards", default=None, help="file, dir or glob of parquet shards")
     val.add_argument("--out-dir", default=None)
-    val.add_argument("--split", default=None, choices=SPLITS)
+    val.add_argument("--split", default=None, help="target dataset split / shard prefix")
     val.add_argument("--run-id", default=None)
     val.add_argument("--expect-rows", type=int, default=None)
     val.set_defaults(func=cmd_validate)
@@ -1201,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("upload", help="validate and upload shards to the dataset repo")
     up.add_argument("--shards", default=None)
     up.add_argument("--out-dir", default=None)
-    up.add_argument("--split", default=None, choices=SPLITS)
+    up.add_argument("--split", default=None, help="target dataset split / shard prefix")
     up.add_argument("--run-id", default=None)
     up.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     up.add_argument("--token", default=None, help="HF token (default: $HF_TOKEN)")
