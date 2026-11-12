@@ -19,6 +19,8 @@ warnings.filterwarnings("ignore", module=r"fontTools.*")
 
 def get_background_df(background_dir):
     background_dir = Path(background_dir).expanduser()
+    if not background_dir.is_dir():
+        return pd.DataFrame()
     manifest_path = background_dir / "manifest.csv"
     if manifest_path.is_file():
         try:

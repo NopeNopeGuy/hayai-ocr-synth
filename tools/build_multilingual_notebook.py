@@ -428,9 +428,11 @@ os.environ["BACKGROUND_ANIMETEXT_DIR"] = str(RESOLVED_BG_DIR)""")
 # 6. Sanity Check Font Support for Target Language
 # ---------------------------------------------------------------------------
 from manga_ocr_dev.synthetic_data_generator.generator import SyntheticDataGenerator
+from manga_ocr_dev.synthetic_data_generator.utils import get_background_df
 
 print(f"Initializing generator with FONTS_ROOT={os.environ['FONTS_ROOT']} and lang={LANGUAGE}...")
-gen = SyntheticDataGenerator()
+bg_df = get_background_df(RESOLVED_BG_DIR)
+gen = SyntheticDataGenerator(background_df=bg_df)
 
 sample_font = gen.get_random_font(lang=LANGUAGE)
 print(f"Successfully sampled font for '{LANGUAGE}': {Path(sample_font).name}")
