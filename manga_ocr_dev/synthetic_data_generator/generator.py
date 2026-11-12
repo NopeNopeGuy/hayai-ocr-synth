@@ -484,7 +484,7 @@ class SyntheticDataGenerator:
                 w = np.array([_kana_weight(c) for c in pools[key]], dtype=float)
                 pools[key + "_p"] = w / w.sum() if w.size else None
             self._pool_cache[vocab_key] = pools
-            while len(self._pool_cache) > 16:
+            while len(self._pool_cache) > 128:
                 self._pool_cache.pop(next(iter(self._pool_cache)))
         return pools
 

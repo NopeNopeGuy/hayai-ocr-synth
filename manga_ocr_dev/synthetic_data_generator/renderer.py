@@ -310,10 +310,10 @@ _NAMED_COLORS = {
     "brown": (150, 75, 0, 255),
 }
 
-_FONT_CACHE_MAX = 16
-_LARGE_FONT_BYTES = 25 * (1 << 20)  # 25 MB: evict giant fonts as soon as sample switches
+_FONT_CACHE_MAX = 256
+_LARGE_FONT_BYTES = 256 * (1 << 20)  # 25 MB: evict giant fonts as soon as sample switches
 _BG_IMAGE_CACHE = OrderedDict()
-_BG_IMAGE_CACHE_MAX = 128
+_BG_IMAGE_CACHE_MAX = 2048
 
 
 def _read_bg_cached(path: str):
@@ -927,9 +927,7 @@ class Renderer:
     def _render_once(self, lines, override_css_params=None):
         global _RENDER_COUNT
         _RENDER_COUNT += 1
-        if _RENDER_COUNT % 250 == 0:
-            with _FONT_CACHE_LOCK:
-                _FONT_CACHE.clear()
+        if _RENDER_COUNT % 2000 == 0:
             _trim_native_memory()
 
         img, params = self.render_text(lines, override_css_params)
@@ -2788,10 +2786,10 @@ def crop_by_alpha(img, margin):
 
 
 def blend(img, background):
-    alpha = (img[:, :, 3] / 255)[:, :, np.newaxis]
-    img = img[:, :, :3]
-    img = (background * (1 - alpha) + img * alpha).astype(np.uint8)
-    return img
+    alpha = img[:, :, 3:4].astype(np.float32) * np.float32(1.0 / 255.0)
+    img = img[:, :, :3].astype(np.float32)
+    out = background.astype(np.float32) * (np.float32(1.0) - alpha) + img * alpha
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def rounded_rectangle(src, top_left, bottom_right, radius=1, color=255, thickness=1, line_type=cv2.LINE_AA):

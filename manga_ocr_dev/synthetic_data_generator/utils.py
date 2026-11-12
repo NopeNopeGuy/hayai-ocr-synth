@@ -198,7 +198,7 @@ _BMP = 0x10000
 class FontMap:
     """Memory-compact, read-only ``font_path -> supported characters`` mapping."""
 
-    def __init__(self, paths, bits, extra, lru_size=16):
+    def __init__(self, paths, bits, extra, lru_size=128):
         self.paths = list(paths)
         self.index = {p: i for i, p in enumerate(self.paths)}
         self.bits = bits  # (n_fonts, 8192) uint8, little-endian bit order
@@ -487,7 +487,7 @@ class _FontProbe:
         return ok
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=128)
 def _probe_for(font_path):
     return _FontProbe(font_path)
 
