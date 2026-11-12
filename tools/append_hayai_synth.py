@@ -867,6 +867,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
     failed = 0
     started = time.time()
     try:
+        from tqdm.auto import tqdm
+
+        target_total = total if total > 0 else None
+        pbar = tqdm(
+            total=target_total,
+            initial=written,
+            desc=f"Shards [{cfg['split']}]",
+            unit="img",
+            dynamic_ncols=True,
+        )
+    except Exception:
+        pbar = None
+
+    try:
         while True:
             chunk = list(islice(jobs, cfg["rows_per_shard"]))
             if not chunk:
@@ -878,6 +892,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
                     _eprint(f"FAILED {result.get('image_id')}:\n{result['error']}")
                 else:
                     rows.append(result)
+                if pbar is not None:
+                    pbar.update(1)
             if not rows:
                 _eprint(f"Shard {shard_idx:05d} produced no rows; stopping.")
                 break
@@ -885,14 +901,19 @@ def cmd_generate(args: argparse.Namespace) -> int:
             _write_shard(rows, shard_path)
             written += len(rows)
             elapsed = max(1e-6, time.time() - started)
+            rate = written / elapsed
+            if pbar is not None:
+                pbar.set_postfix({"shard": shard_idx, "rows": written, "failed": failed, "rate": f"{rate:.1f} img/s"})
             print(
-                f"wrote {shard_path.name} rows={len(rows)} total={written} "
-                f"failed={failed} rate={written / elapsed:.1f} img/s"
+                f"\nwrote {shard_path.name} rows={len(rows)} total={written} "
+                f"failed={failed} rate={rate:.1f} img/s"
             )
             shard_idx += 1
             if total >= 0 and written + start_index >= total:
                 break
     finally:
+        if pbar is not None:
+            pbar.close()
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
 

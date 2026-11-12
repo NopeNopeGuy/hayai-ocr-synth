@@ -213,9 +213,14 @@ OVERRIDE_JSON = ""  # @param {type:"string"}
 
 # --- Upload & Hub Controls ---
 PREVIEW_N = 8  # @param {type:"integer"}
+HEADLESS = False  # @param {type:"boolean"}
+SKIP_PREVIEW = False  # @param {type:"boolean"}
 PUSH_TO_HUB = False  # @param {type:"boolean"}
 UPDATE_CARD = True  # @param {type:"boolean"}
 DRY_RUN_CARD = True  # @param {type:"boolean"}
+
+# Auto-detect headless run (e.g. Kaggle Batch Commit / Background Run)
+IS_HEADLESS = HEADLESS or os.environ.get("KAGGLE_KERNEL_RUN_TYPE") == "Batch" or not sys.stdout.isatty()
 
 # Auto-resolve SPLIT if "auto"
 if SPLIT == "auto":
@@ -586,15 +591,24 @@ def run_script(args: list[str]) -> int:
 # 8. Preview Sample Crops
 # ---------------------------------------------------------------------------
 preview_png = OUT_DIR / f"preview-{RUN_ID}.png"
-run_script([
-    "preview", *COMMON,
-    "--preview", str(max(1, PREVIEW_N)),
-    "--preview-out", str(preview_png),
-])
+if SKIP_PREVIEW:
+    print("SKIP_PREVIEW is True: skipping preview generation.")
+else:
+    run_script([
+        "preview", *COMMON,
+        "--preview", str(max(1, PREVIEW_N)),
+        "--preview-out", str(preview_png),
+    ])
 
-from IPython.display import Image, display
-if preview_png.is_file():
-    display(Image(filename=str(preview_png)))""")
+    if IS_HEADLESS:
+        print(f"Headless mode detected: preview contact sheet saved to {preview_png} (display skipped).")
+    else:
+        try:
+            from IPython.display import Image, display
+            if preview_png.is_file():
+                display(Image(filename=str(preview_png)))
+        except Exception as e:
+            print(f"Preview display skipped ({e}); file saved at {preview_png}")""")
 
     # Cell 9: Generate Shards
     add_cell("code", """# ---------------------------------------------------------------------------
