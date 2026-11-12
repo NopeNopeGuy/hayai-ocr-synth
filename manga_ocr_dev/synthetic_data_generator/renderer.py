@@ -2032,7 +2032,7 @@ class Renderer:
                     kw.update(direction="ttb", language=ttb_lang)
                 if stroke_width:
                     kw.update(stroke_width=stroke_width, stroke_fill=op_edge)
-                draw.text((op["cx"], op["cy"]), op["ch"], **kw)
+                _safe_draw_text(draw, (op["cx"], op["cy"]), op["ch"], **kw)
 
     @staticmethod
     def get_random_sfx_params(lang="ja"):
@@ -2551,6 +2551,25 @@ def _char_op_ex(ch, cx, cy, font, cell, angle, vertical, upright):
     return _char_op(ch, cx, cy, font, vertical, upright, cell=cell, angle=angle)
 
 
+def _safe_draw_text(draw, xy, text, **kwargs):
+    """Draw text, catching FreeType/Pillow 'array allocation size too large' stroke errors."""
+    try:
+        draw.text(xy, text, **kwargs)
+    except OSError:
+        sw = kwargs.pop("stroke_width", None)
+        kwargs.pop("stroke_fill", None)
+        if sw and int(sw) > 1:
+            try:
+                draw.text(xy, text, stroke_width=1, **kwargs)
+                return
+            except OSError:
+                pass
+        try:
+            draw.text(xy, text, **kwargs)
+        except OSError:
+            pass
+
+
 def _draw_rotated_char(layer, ch, cx, cy, font, cell, fill, stroke_width, stroke_fill, angle=0.0):
     cell = int(cell)
     tile = Image.new("RGBA", (cell, cell), (0, 0, 0, 0))
@@ -2558,7 +2577,7 @@ def _draw_rotated_char(layer, ch, cx, cy, font, cell, fill, stroke_width, stroke
     kw = {"font": font, "fill": fill, "anchor": "mm"}
     if stroke_width:
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
-    draw.text((cell / 2, cell / 2), ch, **kw)
+    _safe_draw_text(draw, (cell / 2, cell / 2), ch, **kw)
     if angle:
         tile = tile.rotate(270 + angle, resample=Image.BICUBIC)
     else:
@@ -2576,7 +2595,7 @@ def _draw_tilted_char(layer, ch, cx, cy, font, cell, angle, fill, stroke_width, 
     kw = {"font": font, "fill": fill, "anchor": "mm"}
     if stroke_width:
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
-    draw.text((size / 2, size / 2), ch, **kw)
+    _safe_draw_text(draw, (size / 2, size / 2), ch, **kw)
     tile = tile.rotate(angle, resample=Image.BICUBIC)
     layer.paste(tile, (round(cx) - size // 2, round(cy) - size // 2), tile)
 
@@ -2616,7 +2635,7 @@ def _draw_perspective_char(
         kw.update(direction="ttb", language=str(lang or "ja"))
     if stroke_width:
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
-    draw.text((size / 2, size / 2), ch, **kw)
+    _safe_draw_text(draw, (size / 2, size / 2), ch, **kw)
     if aspect:
         nw, nh = max(2, round(size * ax)), max(2, round(size * ay))
         nw += (size - nw) & 1
@@ -2736,7 +2755,7 @@ def _draw_tcy_tile(layer, text, cx, cy, font_path, font_size, fill, stroke_width
     kw = {"font": font, "fill": fill, "anchor": "mm"}
     if stroke_width:
         kw.update(stroke_width=stroke_width, stroke_fill=stroke_fill)
-    draw.text((cell / 2, cell / 2), text, **kw)
+    _safe_draw_text(draw, (cell / 2, cell / 2), text, **kw)
     if angle:
         tile = tile.rotate(angle, resample=Image.BICUBIC)
     layer.paste(tile, (round(cx - cell / 2), round(cy - cell / 2)), tile)

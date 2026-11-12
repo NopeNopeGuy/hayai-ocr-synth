@@ -536,10 +536,17 @@ class Engine:
             if font:
                 override.setdefault("font_path", font)
 
-        if preset == "sfx":
-            img, text_gt, params = self.generator.process(None, override, sfx=True, lang=self.cfg["language"])
-        else:
-            img, text_gt, params = self.generator.process(text, override, sfx=False, lang=self.cfg["language"])
+        try:
+            if preset == "sfx":
+                img, text_gt, params = self.generator.process(None, override, sfx=True, lang=self.cfg["language"])
+            else:
+                img, text_gt, params = self.generator.process(text, override, sfx=False, lang=self.cfg["language"])
+        except OSError:
+            clean_override = {**override, "stroke_size": 0, "extrude": False, "sfx_double_outline": False}
+            if preset == "sfx":
+                img, text_gt, params = self.generator.process(None, clean_override, sfx=True, lang=self.cfg["language"])
+            else:
+                img, text_gt, params = self.generator.process(text, clean_override, sfx=False, lang=self.cfg["language"])
 
         if not text_gt or not str(text_gt).strip():
             raise ValueError("empty transcription")
