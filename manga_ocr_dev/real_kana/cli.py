@@ -32,7 +32,7 @@ from manga_ocr_dev.real_kana.clean import clean_candidates
 from manga_ocr_dev.real_kana.config import DEFAULT_ROOT, KanaConfig
 from manga_ocr_dev.real_kana.dataset import harvest_candidates
 from manga_ocr_dev.real_kana.handwriting import train_head, write_heuristic_labels
-from manga_ocr_dev.real_kana.segment import review_candidates, segment_candidates, verify_candidates
+from manga_ocr_dev.real_kana.segment import segment_candidates, verify_candidates
 from manga_ocr_dev.real_kana.upright import upright_candidates
 from manga_ocr_dev.real_kana.upscale import upscale_candidates
 
@@ -124,7 +124,7 @@ def cmd_label_handwriting(args: argparse.Namespace) -> None:
     from manga_ocr_dev.real_kana.utils import iter_jsonl, load_image
 
     cfg = _cfg(args)
-    backend = "heuristic" if getattr(args, "heuristic_only", False) else getattr(args, "backend", "vision")
+    backend = getattr(args, "backend", "vision")
     threshold = 0.5 if getattr(args, "threshold", None) is None else float(args.threshold)
     client = None
     if backend == "vision":
@@ -287,7 +287,6 @@ def cmd_segment(args: argparse.Namespace) -> None:
         cfg,
         limit=args.limit,
         resume=not args.no_resume,
-        review=args.review,
         shard=getattr(args, "shard", 0),
         shards=getattr(args, "shards", 1),
     )
@@ -305,13 +304,6 @@ def cmd_verify(args: argparse.Namespace) -> None:
         resume=not args.no_resume,
         uncertain_only=not args.all,
     )
-    print(json.dumps(stats, indent=2))
-
-
-def cmd_review(args: argparse.Namespace) -> None:
-    cfg = _cfg(args)
-    client = _vision(cfg, args)
-    stats = review_candidates(cfg, client, limit=args.limit, resume=not args.no_resume)
     print(json.dumps(stats, indent=2))
 
 
@@ -514,7 +506,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", required=True)
     p.add_argument("--backend", default="vision", choices=["vision", "mercury", "heuristic"])
     p.add_argument("--threshold", type=float, default=None, help="decision threshold for mercury/heuristic (default: 0.5)")
-    p.add_argument("--heuristic-only", action="store_true", help="deprecated: use --backend heuristic")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--openrouter-api-key", default=argparse.SUPPRESS)
     p.add_argument("--mercury-model", default=argparse.SUPPRESS)
@@ -568,7 +559,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_filter_cnn)
 
     p = sub.add_parser("segment", help="cut kana with the local charspot model")
-    p.add_argument("--review", action="store_true", help="legacy: immediately verify raw crops with Gemini")
     p.add_argument("--local-model", default=None)
     p.add_argument("--local-backend", default=None, choices=["auto", "onnx", "torch"])
     p.add_argument("--local-min-confidence", type=float, default=None)
@@ -583,10 +573,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="verify every glyph, not only doubtful ones")
     p.add_argument("--limit", type=int, default=argparse.SUPPRESS)
     p.set_defaults(func=cmd_verify)
-
-    p = sub.add_parser("review", help="deprecated: alias for `verify --stage raw --all`")
-    p.add_argument("--limit", type=int, default=argparse.SUPPRESS)
-    p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("clean", help="alpha extraction and component cleaning")
     p.add_argument("--limit", type=int, default=argparse.SUPPRESS)
@@ -627,7 +613,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", help="harvest -> segment -> clean -> upscale -> verify -> upright -> build")
     p.add_argument("--max-scan", type=int, default=50_000)
-    p.add_argument("--review", action="store_true", help="deprecated: verification is on by default")
     p.add_argument("--verify", action="store_true", default=True, help="run the final Gemini verifier (default)")
     p.add_argument("--no-verify", dest="verify", action="store_false", help="skip the Gemini verifier")
     p.add_argument("--verify-all", action="store_true", help="verify every glyph, not only doubtful ones")

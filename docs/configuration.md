@@ -23,9 +23,7 @@ export BACKGROUND_ANIMETEXT_DIR=~/data/manga/AnimeText_background
 Consumers:
 
 - `ASSETS_PATH` → `utils.py:get_charsets/get_font_meta/get_font_profiles` load `vocab.csv`, `fonts.csv`, `font_profiles.json`.
-- `FONTS_ROOT` → `scan_fonts.py`, `scan_font_profiles.py`, `generator_legacy.py` font selection; `run_generate.py` relativizes `font_path` to it for portability.
+- `FONTS_ROOT` → `scan_fonts.py`, `scan_font_profiles.py`, `generator.py` font selection; `run_generate.py` relativizes `font_path` to it for portability.
 - `DATA_SYNTHETIC_ROOT` → `process_text.py:export_lines` writes `lines[/_ko/_zh/_en]`, `run_generate.py:_package_paths` writes `img[/_lang]/meta[/_lang]`, `process_cc100.py` reads `<lang>.txt`.
 - `BACKGROUND_*_DIR` → `renderer.py:get_default_background_df` (AnimeText preferred, Manga109-s fallback), `generate_backgrounds*.py` output.
 - `MANGA109_ROOT` → `process_manga109s.py`, `generate_backgrounds.py` input.
-
-`manga_ocr_dev/README.md:38-50` documents the same table.

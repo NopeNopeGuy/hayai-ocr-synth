@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
-import hashlib
 import io
 import json
 import logging
@@ -53,6 +52,22 @@ from typing import Any
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from manga_ocr_dev.real_kana.utils import (
+        atomic_write_json,
+        iter_jsonl,
+        read_json,
+        sha256_file,
+    )
+except ModuleNotFoundError:  # running the script directly from a source checkout
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from manga_ocr_dev.real_kana.utils import (
+        atomic_write_json,
+        iter_jsonl,
+        read_json,
+        sha256_file,
+    )
+
 DEFAULT_BASE_URL = "https://api.modelbest.ai/v1"
 DEFAULT_MODEL = "MiniCPM-OCR-Jev"
 DEFAULT_BANK = os.environ.get("REAL_KANA_BANK", "/mnt/real-kana-final")
@@ -71,37 +86,6 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def read_json(path: Path, default: Any = None) -> Any:
-    try:
-        with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return default
-
-
-def atomic_write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    os.replace(tmp, path)
-
-
-def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                yield row
-
-
 def batched(iterable: Iterable[Any], size: int) -> Iterator[list[Any]]:
     batch: list[Any] = []
     for item in iterable:
@@ -111,14 +95,6 @@ def batched(iterable: Iterable[Any], size: int) -> Iterator[list[Any]]:
             batch = []
     if batch:
         yield batch
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def percentile(sorted_values: Sequence[float], q: float) -> float | None:

@@ -32,6 +32,8 @@ This repository provides an end-to-end pipeline to generate realistic synthetic 
   - Automated subtitle ASS markup stripping, Aozora Bunko formatting cleanup, and rolling de-duplication.
 - **Tofu Detection & Font Auditing**:
   - Pre-scans and verifies font character coverage against FreeType glyph rasters to prevent missing character boxes in synthetic output.
+- **Degenerate-Crop Quality Gate**:
+  - Every render is checked for blank/invisible ink, low text/background contrast, tiny downscaled glyphs, and extreme sliver aspect ratios. Bad layouts are retried with fresh text/layout parameters instead of being written to the dataset.
 - **Optional Real Handwritten Kana**:
   - Harvest annotated crops from AnimeText-OCR, cut kana locally with `manga-ocr-charspot-small`, optionally verify with Gemini, then clean/upscale/upright them into a local kana bank. Enable it per run with `--real_kana` (off by default, like the SFX split) to swap only eligible kana for real handwriting; kanji, Latin, digits and punctuation stay font-rendered, so labels and pixels remain aligned.
 
@@ -43,8 +45,8 @@ This repository provides an end-to-end pipeline to generate realistic synthetic 
 git clone https://github.com/your-username/manga-ocr-better-synth.git
 cd manga-ocr-better-synth
 
-# Install required dependencies
-pip install -r manga_ocr_dev/requirements.txt
+# Install the package and its dependencies
+pip install -e .
 ```
 
 Optional real handwritten-kana pipeline (vision model + optional DINO or

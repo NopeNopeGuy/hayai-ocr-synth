@@ -1,4 +1,4 @@
-# Renderer (`manga_ocr_dev/synthetic_data_generator/renderer.py`, 3006 lines)
+# Renderer (`manga_ocr_dev/synthetic_data_generator/renderer.py`, 2861 lines)
 
 Pure-Pillow replacement for the legacy headless-Chrome (`html2image`) screenshotting pipeline. Renders BGRA/BGR `uint8` numpy arrays (BGR channel order, like `cv2.imread(..., IMREAD_UNCHANGED)`). Module docstring `renderer.py:1-68` is the design rationale.
 

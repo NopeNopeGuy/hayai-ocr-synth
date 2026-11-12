@@ -36,7 +36,7 @@ def export_dialogue(
     dialogue_splits: str | Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
     novel_configs: Sequence[str] = DEFAULT_NOVEL_CONFIGS,
     dialogue_ratio: float = 0.5,
-    streaming: bool = True,
+    streaming: bool = False,
     dialogue_dataset_name: str = DEFAULT_DIALOGUE_DATASET,
     novel_dataset_name: str = DEFAULT_NOVEL_DATASET,
     dialogue_data_dir: str | None = None,

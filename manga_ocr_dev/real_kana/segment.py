@@ -58,10 +58,6 @@ def _iter_candidates(cfg: KanaConfig) -> Iterator[dict[str, Any]]:
     yield from iter_jsonl(index)
 
 
-def _records_path(cfg: KanaConfig, stage: str, crop_id: str) -> Path:
-    return cfg.root / stage / safe_id(crop_id) / "records.json"
-
-
 def load_stage_records(cfg: KanaConfig, stage: str) -> list[dict[str, Any]]:
     """Load all records of a stage, one records.json per source crop."""
 
@@ -93,7 +89,6 @@ def segment_candidates(
     segmenter: Any | None = None,
     limit: int | None = None,
     resume: bool = True,
-    review: bool = False,
     shard: int = 0,
     shards: int = 1,
     log_every: int = 25,
@@ -105,9 +100,7 @@ def segment_candidates(
     printed or SFX is recorded with an empty glyph list and skipped.
 
     ``client`` is only for the legacy vision path (and tests); when it is
-    ``None`` the local model is used.  ``review`` is a compatibility shortcut
-    that verifies the raw crops immediately; the normal flow verifies after
-    cleaning and upscaling instead.
+    ``None`` the local model is used.
     """
 
     cfg = cfg or KanaConfig()
@@ -290,12 +283,6 @@ def segment_candidates(
         if stats["seen"] % log_every == 0:
             log.info("segmentation: %s", stats)
 
-    if review:
-        if client is None:
-            from manga_ocr_dev.real_kana.vision import build_vision
-
-            client = build_vision(cfg)
-        verify_candidates(cfg, client, stage="raw", limit=limit, resume=resume, uncertain_only=False)
     return stats
 
 

@@ -1,5 +1,7 @@
 """Tests for multilingual (ko/zh/en) synthetic text generation."""
 
+import unicodedata
+
 import numpy as np
 import pytest
 
@@ -249,6 +251,21 @@ def gen():
         return SyntheticDataGenerator()
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"generator env not available: {e}")
+
+
+def test_random_ja_pool_excludes_standalone_combining_marks():
+    """Combining dakuten/handakuten must never be sampled as their own kana."""
+    from manga_ocr_dev.synthetic_data_generator.generator import (
+        SyntheticDataGenerator,
+    )
+
+    g = SyntheticDataGenerator.__new__(SyntheticDataGenerator)
+    g._pool_cache = {}
+    vocab = list("あいうえおがぎぐげごア") + ["\u3099", "\u309a"]
+    pools = g._pools("combining-marks", vocab)
+    assert "\u3099" not in pools["hira"] and "\u309a" not in pools["hira"]
+    for word in g._uniform_fallback(list("あいう") + ["\u3099", "\u309a"]):
+        assert all(not unicodedata.category(c).startswith("M") for c in word)
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ import math
 import os
 import re
 import threading
+import unicodedata
 
 import albumentations as A
 import cv2
@@ -35,6 +36,10 @@ try:
     _LIBC = ctypes.CDLL("libc.so.6")
 except Exception:
     _LIBC = None
+
+
+class DegenerateSampleError(ValueError):
+    """Raised when a render is unusable for OCR training (blank, tiny or invisible text)."""
 
 
 def _trim_native_memory():
@@ -90,13 +95,16 @@ def _bank_root_candidates(default=None):
 
 
 def _is_bank_root(root) -> bool:
-    return (root / "manifest.jsonl").is_file() or any((root / "glyphs").glob("*/*.png"))
+    return (
+        (root / "kana_bank.npz").is_file()
+        or (root / "glyphs.npz").is_file()
+        or (root / "manifest.jsonl").is_file()
+        or any((root / "glyphs").glob("*/*.png"))
+    )
 
 
 def _get_real_kana_bank(root=None, cfg=None):
     """Load and cache a bank, or return ``None`` when none is installed."""
-
-    from pathlib import Path
 
     roots = list(_bank_root_candidates(root))
     chosen = None
@@ -162,7 +170,6 @@ SFX_SPEEDLINE_PROB = 0.6
 SFX_SPEEDLINE_N_RANGE = (24, 80)
 SFX_BURST_PROB = 0.35
 SFX_DOUBLE_OUTLINE_PROB = 0.3
-SFX_VERTICAL_PROB = 0.4
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
 SFX_CROP_MARGIN_MIN = 2
 SFX_INK_ALPHA_THRESHOLD = 8
@@ -224,7 +231,6 @@ EXTRUDE_PROB = 0.15
 DISTRESS_PROB = 0.22
 FAINT_PROB = 0.10
 FG_OCCLUDE_PROB = 0.35
-DISTRACTOR_PROB = 0.0
 DEGRADE_JPEG_PROB = 0.5
 DEGRADE_SCALE_PROB = 0.3
 DEGRADE_BLUR_PROB = 0.25
@@ -243,6 +249,17 @@ SCAN_DEFOCUS_PROB = 0.3
 SCAN_DEFOCUS_SIGMA = (0.35, 0.9)
 SCAN_NOISE_PROB = 0.35
 SCAN_NOISE_SIGMA = (2.0, 7.0)
+
+# Quality gate: reject degenerate crops instead of writing them to the dataset.
+MIN_OUTPUT_SIDE = 32  # px, tiny slivers are not useful OCR samples
+MAX_OUTPUT_ASPECT = 12.0  # hard cap for very long strips
+STRIP_ASPECT = 6.0  # strips beyond this must still contain large, visible text
+MIN_EFFECTIVE_FONT = 16.0  # px after the final 600px downscale
+MIN_VISIBLE_TEXT_FRAC = 0.50  # share of ink pixels that must contrast with the background
+MIN_TEXT_CONTRAST = 28.0  # luminance difference (0-255) counted as visible
+MIN_TEXT_ALPHA_FOR_QUALITY = 0.20
+RENDER_ATTEMPTS = 3  # retries for random background/bubble sampling
+SAMPLE_ATTEMPTS = 4  # retries that resample the text layout in the generator
 
 RUBY_RE = re.compile(r"<ruby>(.*?)<rt>(.*?)</rt></ruby>")
 TCY_RE = re.compile(r"<span[^>]*?text-combine-upright[^>]*?>(.*?)</span>")
@@ -271,7 +288,7 @@ _NAMED_COLORS = {
 _FONT_CACHE_MAX = 16
 _LARGE_FONT_BYTES = 25 * (1 << 20)  # 25 MB: evict giant fonts as soon as sample switches
 _BG_IMAGE_CACHE = OrderedDict()
-_BG_IMAGE_CACHE_MAX = 8
+_BG_IMAGE_CACHE_MAX = 128
 
 
 def _read_bg_cached(path: str):
@@ -562,6 +579,22 @@ def _strip_tags(s):
     return TAG_RE.sub("", s)
 
 
+def _graphemes(text):
+    """Split text into base characters with their combining marks attached.
+
+    Japanese fonts draw a lone combining mark (e.g. U+3099 dakuten) inside a
+    dotted-circle placeholder, so ``"ぃ" + "\\u3099"`` must be laid out and
+    rasterized as one glyph cluster instead of two independent cells.
+    """
+    clusters = []
+    for ch in text:
+        if clusters and unicodedata.category(ch).startswith("M"):
+            clusters[-1] += ch
+        else:
+            clusters.append(ch)
+    return clusters
+
+
 def _parse_inline(s):
     tokens = []
     pos = 0
@@ -704,18 +737,6 @@ def _draw_foreground_occluders_bgr(img_bgr, density=1.0):
         f *= (1.0 - float(np.random.uniform(0.15, 0.4)) * dots)[..., None] if out.ndim == 3 else (1.0 - 0.3 * dots)
         out = np.clip(f, 0, 255).astype(np.uint8)
     return out
-
-
-_DISTRACTOR_CHARS = {
-    "ja": list("アカサタナハマヤラワガザダバパドンビキクケコ0123456789"),
-    "ko": list("가나다라마바사아자차카타파하거너더러머버서어0123456789"),
-    "zh": list("的一是不了我有个人好这中大来上0123456789"),
-    "en": list("ABCDEFGHKMRWZabcdegkmwxyz0123456789"),
-}
-
-
-def _draw_distractor_fragments_bgr(img_bgr, font_path, cell=48, lang="ja"):
-    return img_bgr
 
 
 def _truncate_bgr(img, ink_box=None, bite_px=0, frac_range=TRUNC_FRAC_RANGE):
@@ -867,6 +888,18 @@ class Renderer:
         self.max_size = 600
 
     def render(self, lines, override_css_params=None):
+        # Background/bubble sampling is random, so give a single layout a few
+        # chances before rejecting it.  Layout-level failures (tiny text,
+        # extreme aspect) are handled by the caller resampling text/params.
+        last_error = None
+        for _ in range(RENDER_ATTEMPTS):
+            try:
+                return self._render_once(lines, override_css_params)
+            except DegenerateSampleError as exc:
+                last_error = exc
+        raise last_error
+
+    def _render_once(self, lines, override_css_params=None):
         global _RENDER_COUNT
         _RENDER_COUNT += 1
         if _RENDER_COUNT % 250 == 0:
@@ -887,16 +920,35 @@ class Renderer:
             draw_bubble = bool(np.random.rand() < float(params["bubble_prob"]))
 
         tight = bool(params.get("tight", bool(params.get("sfx"))))
-        img, ink_box = self.render_background(
-            img, draw_bubble=draw_bubble, tight=tight, return_ink_box=True
+        img, ink_box, quality = self.render_background(
+            img, draw_bubble=draw_bubble, tight=tight, return_ink_box=True, return_info=True
         )
         if np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
             bite = TRUNC_INK_BITE_EM * float(params.get("font_size", 48))
             img = _truncate_bgr(img, ink_box=ink_box, bite_px=bite)
         if np.random.rand() < FG_OCCLUDE_PROB:
             img = _draw_foreground_occluders_bgr(img, density=float(np.random.uniform(0.7, 1.4)))
+        pre_scale_h, pre_scale_w = img.shape[:2]
         if max(img.shape[:2]) > self.max_size:
             img = A.LongestMaxSize(self.max_size)(image=img)["image"]
+        final_scale = min(1.0, float(self.max_size) / max(1, pre_scale_h, pre_scale_w))
+        h, w = img.shape[:2]
+        issues = []
+        if min(h, w) < MIN_OUTPUT_SIDE:
+            issues.append(f"too small ({w}x{h})")
+        aspect = max(h, w) / max(1, min(h, w))
+        if aspect > MAX_OUTPUT_ASPECT:
+            issues.append(f"extreme aspect ratio ({aspect:.1f}:1)")
+        effective_font = float(params.get("font_size", 48)) * final_scale
+        if effective_font < MIN_EFFECTIVE_FONT:
+            issues.append(f"text too small after downscale ({effective_font:.1f}px)")
+        visible_frac = float(quality.get("visible_frac", 1.0))
+        if visible_frac < MIN_VISIBLE_TEXT_FRAC:
+            issues.append(f"text has too little background contrast ({visible_frac:.2f})")
+        if aspect > STRIP_ASPECT and (effective_font < 24.0 or visible_frac < 0.70):
+            issues.append(f"thin strip without clear text ({aspect:.1f}:1, {effective_font:.1f}px, {visible_frac:.2f})")
+        if issues:
+            raise DegenerateSampleError("degenerate synthetic crop: " + ", ".join(issues))
         is_color = _params_are_color(params)
         img = _scan_model_bgr(img)
         img = _degrade_bgr(img, is_color)
@@ -1114,6 +1166,7 @@ class Renderer:
                 font_path=font_path,
                 font_size=font_size,
                 use_op_fill=True,
+                edge_override=stroke_rgba,
                 lang=str(params.get("lang", "ja")),
                 kana_bank=kana_bank,
             )
@@ -1207,7 +1260,7 @@ class Renderer:
                 default_prob = getattr(cfg, "real_kana_prob", REAL_KANA_PROB)
             prob = params.get("real_kana_prob", default_prob)
             seed = params.get("real_kana_seed", None)
-            rng = np.random.default_rng(int(seed) if seed is not None else None)
+            rng = np.random.default_rng(int(seed)) if seed is not None else np.random
             stats = attach_real_kana(ops, bank, cfg=cfg, rng=rng, probability=float(prob), lang="ja")
             params["real_kana_stats"] = {
                 "attached": stats["attached"],
@@ -1245,9 +1298,9 @@ class Renderer:
                 ruby = False
                 for tok in tokens:
                     if tok[0] == "text":
-                        n += len(_strip_tags(tok[1]))
+                        n += len(_graphemes(_strip_tags(tok[1])))
                     elif tok[0] == "ruby":
-                        n += len(_strip_tags(tok[1]))
+                        n += len(_graphemes(_strip_tags(tok[1])))
                         ruby = True
                     elif tok[0] == "tcy":
                         n += 1
@@ -1268,13 +1321,13 @@ class Renderer:
                 y = y_top
                 for tok in tokens:
                     if tok[0] == "text":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             cy = y + font_size / 2
                             ops.append(_char_op(ch, base_cx, cy, font, vertical, upright))
                             y += font_size
                     elif tok[0] == "ruby":
-                        base = _strip_tags(tok[1])
-                        rt = _strip_tags(tok[2])
+                        base = _graphemes(_strip_tags(tok[1]))
+                        rt = _graphemes(_strip_tags(tok[2]))
                         block_h = len(base) * font_size
                         total_rt_h = len(rt) * ruby_size
                         ry = y + (block_h - total_rt_h) / 2
@@ -1291,7 +1344,7 @@ class Renderer:
                                     "cy": ry + ruby_size / 2,
                                     "font": ruby_font,
                                     "rotate": False,
-                                    "ttb": vertical and not is_ascii(ch),
+                                    "ttb": vertical and not is_ascii(ch[0]),
                                 }
                             )
                             ry += ruby_size
@@ -1310,14 +1363,14 @@ class Renderer:
                 ruby = False
                 for tok in tokens:
                     if tok[0] == "text":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             w += _advance(font, ch, letter_spacing_px)
                     elif tok[0] == "ruby":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             w += _advance(font, ch, letter_spacing_px)
                         ruby = True
                     elif tok[0] == "tcy":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             w += _advance(font, ch, letter_spacing_px)
                 widths.append(w)
                 has_ruby.append(ruby)
@@ -1335,7 +1388,7 @@ class Renderer:
                 x = x_left
                 for tok in tokens:
                     if tok[0] == "text":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             adv = _advance(font, ch, letter_spacing_px)
                             ops.append(
                                 {
@@ -1350,8 +1403,8 @@ class Renderer:
                             )
                             x += adv
                     elif tok[0] == "ruby":
-                        base = _strip_tags(tok[1])
-                        rt = _strip_tags(tok[2])
+                        base = _graphemes(_strip_tags(tok[1]))
+                        rt = _graphemes(_strip_tags(tok[2]))
                         block_w = sum(_advance(font, ch, letter_spacing_px) for ch in base)
                         total_rt_w = sum(ruby_font.getlength(ch) for ch in rt)
                         rx = x + (block_w - total_rt_w) / 2
@@ -1384,7 +1437,7 @@ class Renderer:
                             )
                             rx += adv
                     elif tok[0] == "tcy":
-                        for ch in _strip_tags(tok[1]):
+                        for ch in _graphemes(_strip_tags(tok[1])):
                             adv = _advance(font, ch, letter_spacing_px)
                             ops.append(
                                 {
@@ -1438,7 +1491,7 @@ class Renderer:
 
         def char_spec(ch, fs, jitter_on):
             scale = 1.0
-            if small_kana and ch in SMALL_KANA:
+            if small_kana and ch[0] in SMALL_KANA:
                 scale *= float(np.random.uniform(*SMALL_KANA_SCALE))
             if jitter_on:
                 scale *= float(np.random.uniform(char_scale_min, char_scale_max))
@@ -1472,7 +1525,7 @@ class Renderer:
                 if tok[0] == "text":
                     specs = []
                     seg_len = 0
-                    for ch in _strip_tags(tok[1]):
+                    for ch in _graphemes(_strip_tags(tok[1])):
                         font, cell, angle, cross = char_spec(ch, fs, line_jitter[li])
                         adv = (cell + sp) if vertical else _advance(font, ch, sp)
                         specs.append((ch, font, cell, adv, angle, cross))
@@ -1480,8 +1533,8 @@ class Renderer:
                     segments.append(("chars", specs, seg_len))
                     total += seg_len
                 elif tok[0] == "ruby":
-                    base = _strip_tags(tok[1])
-                    rt = _strip_tags(tok[2])
+                    base = _graphemes(_strip_tags(tok[1]))
+                    rt = _graphemes(_strip_tags(tok[2]))
                     if vertical:
                         base_advs = [fs + sp for _ in base]
                         rt_len = len(rt) * ruby_size
@@ -1553,7 +1606,7 @@ class Renderer:
                                     "cell": ruby_size,
                                     "angle": 0.0,
                                     "rotate": False,
-                                    "ttb": vertical and not is_ascii(ch),
+                                    "ttb": vertical and not is_ascii(ch[0]),
                                 }
                             )
                             ry += ruby_size
@@ -1708,7 +1761,7 @@ class Renderer:
             if prev_scale is not None:
                 scale = float(np.clip(scale, prev_scale / SFX_ADJACENT_SCALE_MAX, prev_scale * SFX_ADJACENT_SCALE_MAX))
             base_scale = scale
-            is_small = bool(small_kana and ch in SMALL_KANA)
+            is_small = bool(small_kana and ch[0] in SMALL_KANA)
             if is_small:
                 scale *= float(np.random.uniform(*SMALL_KANA_SCALE))
                 if cap_ref is not None:
@@ -1727,7 +1780,7 @@ class Renderer:
             out = []
             for tok in tokens:
                 if tok[0] in ("text", "tcy") or tok[0] == "ruby":
-                    out.extend(list(_strip_tags(tok[1])))
+                    out.extend(_graphemes(_strip_tags(tok[1])))
             return out
 
         def curve_offset(t):
@@ -1804,7 +1857,7 @@ class Renderer:
                     cx = pos + adv / 2
                     cy = line_origins[li] + fs / 2 + off_px + cross
                     final_angle = angle + tangent_deg
-                if vertical and is_ascii(ch) and not upright and not ch.isspace():
+                if vertical and is_ascii(ch[0]) and not upright and not ch.isspace():
                     rot_flag = True
                 else:
                     rot_flag = False
@@ -1821,7 +1874,7 @@ class Renderer:
                         "pcoef": tuple(float(v) for v in np.random.uniform(-1.0, 1.0, 8)),
                         "aspect": asp,
                         "rotate": rot_flag,
-                        "ttb": vertical and not is_ascii(ch),
+                        "ttb": vertical and not is_ascii(ch[0]),
                         "line": li,
                     }
                 )
@@ -2156,7 +2209,11 @@ class Renderer:
 
     @staticmethod
     def _ink_edge(img):
-        solid = (img[:, :, 3] > 200).astype(np.uint8)
+        # Use every visible pixel, not only fully opaque ones.  Faint ink
+        # (``faint_alpha``) and anti-aliased outlines can have alpha well below
+        # 200; ignoring them made the renderer mistake white ink for black and
+        # pick a white bubble, producing invisible white-on-white text.
+        solid = (img[:, :, 3] > 8).astype(np.uint8)
         if not solid.any():
             return None, None
         k = np.ones((3, 3), np.uint8)
@@ -2204,13 +2261,8 @@ class Renderer:
                     bg = _colorize_background(bg, ref, strength=float(np.random.uniform(0.35, 0.7)))
             if self._low_contrast_frac(bg, edge_lum, ring) <= BG_MAX_LOW_CONTRAST:
                 return bg
-        if np.random.rand() < BG_CAMO_PROB:
-            bg = self._decorate_background(self._adjust_background(bg0, ink_lum))
-            if chromatic_ink:
-                ref = self._ink_mean_bgr(img)
-                if ref is not None:
-                    bg = _colorize_background(bg, ref, strength=0.6)
-            return bg
+        # Never fall back to a camouflage background: an illegible sample is
+        # worse than a clean one and is exactly what the quality gate rejects.
         far = 70.0 if ink_lum >= 128 else 195.0
         f = bg0.astype(np.float32)
         f = (f - f.mean()) * 1.0 + far
@@ -2273,7 +2325,29 @@ class Renderer:
             return mode, (v, v, v), (w, w, w)
         return mode, white, black
 
-    def render_background(self, img, draw_bubble=None, tight=False, return_ink_box=False):
+    @staticmethod
+    def _text_visibility(rgba, background):
+        """Measure how much of the rendered ink contrasts with its background.
+
+        Returns a small dict with ``visible_frac`` (share of inked pixels whose
+        blended luminance differs from the background) and ``ink_frac``.
+        """
+        arr = np.asarray(rgba)
+        alpha = arr[:, :, 3].astype(np.float32) / 255.0
+        ink = alpha > MIN_TEXT_ALPHA_FOR_QUALITY
+        ink_frac = float(ink.mean()) if ink.size else 0.0
+        if int(ink.sum()) < 16:
+            return {"visible_frac": 0.0, "ink_frac": ink_frac}
+        rgb = arr[:, :, :3].astype(np.float32)
+        bg = background.astype(np.float32)
+        blended = bg * (1.0 - alpha[..., None]) + rgb * alpha[..., None]
+        # OpenCV images are BGR; use standard luminance weights.
+        ink_lum = 0.114 * blended[:, :, 0] + 0.587 * blended[:, :, 1] + 0.299 * blended[:, :, 2]
+        bg_lum = 0.114 * bg[:, :, 0] + 0.587 * bg[:, :, 1] + 0.299 * bg[:, :, 2]
+        visible = np.abs(ink_lum - bg_lum) >= MIN_TEXT_CONTRAST
+        return {"visible_frac": float(visible[ink].mean()), "ink_frac": ink_frac}
+
+    def render_background(self, img, draw_bubble=None, tight=False, return_ink_box=False, return_info=False):
         if draw_bubble is None:
             draw_bubble = np.random.random() < 0.7
 
@@ -2285,14 +2359,24 @@ class Renderer:
             m0 = int(min(img.shape[:2]) * 0.3)
         img = crop_by_alpha(img, m0)
         ink_box = (m0, m0, img.shape[1] - m0, img.shape[0] - m0)
+        chromatic_ink = self._ink_is_chromatic_bgra(img)
 
         fill_mode, fill_bgr, contour_bgr = "white", (255, 255, 255), (0, 0, 0)
         if draw_bubble:
             edge_lum, _ = self._ink_edge(img)
             edge_lum = 0.0 if edge_lum is None else edge_lum
+            # A dark bubble inverts the ink so that dark text becomes light.
+            # Light ink (e.g. a white hollow outline) must *not* be inverted:
+            # doing so turns it into dark ink on a dark fill.
+            invert_for_dark = edge_lum < 128.0 and not chromatic_ink
             for _ in range(BG_MAX_TRIES):
                 fill_mode, fill_bgr, contour_bgr = self._sample_bubble_fill()
-                ink = 255.0 - edge_lum if fill_mode == "dark" else edge_lum
+                if chromatic_ink and fill_mode == "dark":
+                    # Inverting a coloured glyph would change its colour; pick
+                    # a light bubble instead so coloured ink stays coloured.
+                    continue
+                inverted = fill_mode == "dark" and invert_for_dark
+                ink = 255.0 - edge_lum if inverted else edge_lum
                 fl = float(np.mean(fill_bgr))
                 lums = [fl, 255.0 * (1.0 - 0.45)] if fill_mode == "tone" else [fl]
                 if all(abs(ink - L) >= BG_MIN_EDGE_DIFF for L in lums):
@@ -2301,9 +2385,10 @@ class Renderer:
                 fill_mode, fill_bgr, contour_bgr = ("white", (255, 255, 255), (0, 0, 0))
                 if edge_lum > 150:
                     fill_mode, fill_bgr, contour_bgr = ("dark", (30, 30, 30), (235, 235, 235))
-            if fill_mode == "dark":
+                inverted = fill_mode == "dark" and invert_for_dark
+            if inverted:
                 img[:, :, :3] = 255 - img[:, :, :3]
-        elif np.random.rand() < 0.5:
+        elif not chromatic_ink and np.random.rand() < 0.5:
             img[:, :, :3] = 255 - img[:, :, :3]
 
         background = self._load_background(img.shape[0], img.shape[1])
@@ -2343,10 +2428,17 @@ class Renderer:
                 thickness=thickness,
             )
 
-            t = [
-                A.ElasticTransform(alpha=alpha, sigma=sigma, p=0.8),
-            ]
-            bubble = A.Compose(t)(image=bubble)["image"]
+            bh, bw = bubble.shape[:2]
+            if max(bh, bw) > 300:
+                small_bubble = cv2.resize(bubble, (bw // 2, bh // 2), interpolation=cv2.INTER_NEAREST)
+                small_t = [A.ElasticTransform(alpha=alpha / 2.0, sigma=sigma / 2.0, p=0.8)]
+                warped = A.Compose(small_t)(image=small_bubble)["image"]
+                bubble = cv2.resize(warped, (bw, bh), interpolation=cv2.INTER_LINEAR)
+            else:
+                t = [
+                    A.ElasticTransform(alpha=alpha, sigma=sigma, p=0.8),
+                ]
+                bubble = A.Compose(t)(image=bubble)["image"]
 
             if fill_mode == "tone":
                 dots = _screentone(bubble.shape[0], bubble.shape[1])
@@ -2355,10 +2447,20 @@ class Renderer:
 
             background = blend(bubble, background)
 
+        quality = self._text_visibility(img, background)
         img = blend(img, background)
 
+        def _result(out):
+            if return_ink_box and return_info:
+                return out, ink_box, quality
+            if return_ink_box:
+                return out, ink_box
+            if return_info:
+                return out, quality
+            return out
+
         if tight:
-            return (img, ink_box) if return_ink_box else img
+            return _result(img)
 
         ymin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
         ymax = img.shape[0] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.01, 0.2))
@@ -2381,8 +2483,7 @@ class Renderer:
                 min(img.shape[1], bx1 - xmin),
                 min(img.shape[0], by1 - ymin),
             )
-            return img, ink_box
-        return img
+        return _result(img)
 
 
 def _advance(font, ch, letter_spacing_px):
@@ -2396,7 +2497,7 @@ def _advance(font, ch, letter_spacing_px):
 
 
 def _char_op(ch, cx, cy, font, vertical, upright, cell=None, angle=0.0):
-    if vertical and is_ascii(ch) and not upright and not ch.isspace():
+    if vertical and is_ascii(ch[0]) and not upright and not ch.isspace():
         return {
             "kind": "char",
             "ch": ch,
@@ -2417,7 +2518,7 @@ def _char_op(ch, cx, cy, font, vertical, upright, cell=None, angle=0.0):
         "cell": cell,
         "angle": angle,
         "rotate": False,
-        "ttb": vertical and not is_ascii(ch),
+        "ttb": vertical and not is_ascii(ch[0]),
     }
 
 
@@ -2617,11 +2718,14 @@ def _draw_tcy_tile(layer, text, cx, cy, font_path, font_size, fill, stroke_width
 
 
 def _screentone(h, w):
-    period = np.random.uniform(3.0, 8.0)
-    ang = np.random.uniform(0, np.pi)
-    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    u = (xx * np.cos(ang) + yy * np.sin(ang)) * (2 * np.pi / period)
-    v = (-xx * np.sin(ang) + yy * np.cos(ang)) * (2 * np.pi / period)
+    period = float(np.random.uniform(3.0, 8.0))
+    ang = float(np.random.uniform(0, np.pi))
+    ca = float(np.cos(ang) * (2.0 * np.pi / period))
+    sa = float(np.sin(ang) * (2.0 * np.pi / period))
+    xx = np.arange(w, dtype=np.float32)
+    yy = np.arange(h, dtype=np.float32)
+    u = (xx * ca)[None, :] + (yy * sa)[:, None]
+    v = (-xx * sa)[None, :] + (yy * ca)[:, None]
     pat = 0.5 * (np.cos(u) + np.cos(v))
     return np.clip((pat - np.random.uniform(0.0, 0.6)) * 4.0, 0.0, 1.0)
 

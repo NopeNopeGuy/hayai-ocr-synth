@@ -45,7 +45,7 @@ def _white_core_fraction(rgba: Image.Image) -> float:
 
 def _speckle_count(rgba: Image.Image) -> int:
     alpha = (np.asarray(rgba.getchannel("A")) >= 96).astype(np.uint8)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(alpha, connectivity=8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(alpha, connectivity=8)
     if n <= 1:
         return 0
     areas = stats[1:, cv2.CC_STAT_AREA]

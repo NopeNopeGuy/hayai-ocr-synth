@@ -229,8 +229,21 @@ def get_font_meta():
     if _GLOBAL_FONT_META is not None:
         return _GLOBAL_FONT_META
 
+    cache_file = ASSETS_PATH / "fonts.cache.pkl"
+    csv_file = ASSETS_PATH / "fonts.csv"
+    if cache_file.is_file() and csv_file.is_file():
+        try:
+            if cache_file.stat().st_mtime >= csv_file.stat().st_mtime:
+                import pickle
+
+                with open(cache_file, "rb") as f:
+                    _GLOBAL_FONT_META = pickle.load(f)
+                return _GLOBAL_FONT_META
+        except Exception:  # noqa: BLE001
+            pass
+
     frames, paths, rows, extra = [], [], [], {}
-    for chunk in pd.read_csv(ASSETS_PATH / "fonts.csv", chunksize=1000):
+    for chunk in pd.read_csv(csv_file, chunksize=1000):
         chunk = chunk.dropna(subset=["supported_chars"])
         chunk = chunk[chunk.supported_chars.str.len() > 0].copy()
         chunk["font_path"] = chunk.font_path.apply(lambda x: str(FONTS_ROOT / x))
@@ -247,6 +260,13 @@ def get_font_meta():
         raise RuntimeError("fonts.csv has no usable fonts: run scan_fonts.py first")
     df = pd.concat(frames, ignore_index=True)
     _GLOBAL_FONT_META = (df, FontMap(paths, np.stack(rows), extra))
+    try:
+        import pickle
+
+        with open(cache_file, "wb") as f:
+            pickle.dump(_GLOBAL_FONT_META, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:  # noqa: BLE001
+        pass
     return _GLOBAL_FONT_META
 
 

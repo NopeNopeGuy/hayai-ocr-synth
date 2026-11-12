@@ -207,9 +207,6 @@ class SFXComposer:
         return self._pools[key]
 
     # --------------------------------------------------------------- patterns
-    def _long_or(self, p, default=""):
-        return p.long if p.long and np.random.rand() < 0.5 else default
-
     def _burst(self, p):
         return p.m() + p.tsu
 

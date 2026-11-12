@@ -534,7 +534,7 @@ def test_offline_pipeline_and_renderer(tmp_path):
     cfg = KanaConfig(root=tmp_path)
     ensure_bank_dirs(tmp_path)
     client = FakeVision(boxes, "あいうえお")
-    assert segment_candidates(cfg, client, review=False)["glyphs"] == 5
+    assert segment_candidates(cfg, client)["glyphs"] == 5
     assert clean_candidates(cfg)["glyphs"] == 5
     assert upscale_candidates(cfg)["glyphs"] == 5
     assert upright_candidates(cfg)["glyphs"] == 5
@@ -707,7 +707,7 @@ def test_review_pass(tmp_path):
     cfg = KanaConfig(root=tmp_path)
     ensure_bank_dirs(tmp_path)
     client = FakeVision(boxes, "あいうえお")
-    segment_candidates(cfg, client, review=False)
+    segment_candidates(cfg, client)
     from manga_ocr_dev.real_kana.segment import review_candidates
 
     stats = review_candidates(cfg, client)

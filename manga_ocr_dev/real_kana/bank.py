@@ -64,6 +64,7 @@ class KanaGlyph:
     reviewed: bool = False
     sha256: str = ""
     source: dict[str, Any] = field(default_factory=dict)
+    pack_index: int = -1
 
     @property
     def is_derived(self) -> bool:
@@ -174,7 +175,10 @@ class KanaBank:
         self._by_id: dict[str, KanaGlyph] = {}
         self._alpha_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._render_cache: OrderedDict[tuple[Any, ...], Image.Image] = OrderedDict()
-        self._cache_limit = 1024
+        self._cache_limit = 4096
+        self._flat_alphas: np.ndarray | None = None
+        self._pack_offsets: np.ndarray | None = None
+        self._pack_shapes: np.ndarray | None = None
         for glyph in glyphs:
             self._add(glyph)
         self._derive_missing_small_kana()
@@ -182,26 +186,65 @@ class KanaBank:
     # -- construction -----------------------------------------------------
 
     @classmethod
+    def from_npz(cls, path: str | Path, cfg: KanaConfig | None = None) -> "KanaBank":
+        """Load an entire pre-packed kana bank instantly with zero per-file I/O seeks."""
+        cfg = cfg or KanaConfig()
+        path = Path(path).expanduser()
+        data = np.load(path)
+        flat_alphas = data["alphas"]
+        offsets = data["offsets"]
+        shapes = data["shapes"]
+        glyph_ids = data["glyph_ids"]
+        labels = data["labels"]
+        stroke_widths = data["stroke_widths"]
+        upscales = data.get("upscales")
+        widths = data.get("widths")
+        heights = data.get("heights")
+
+        n = len(glyph_ids)
+        glyphs = []
+        for i in range(n):
+            gid = str(glyph_ids[i])
+            label = str(labels[i])
+            sw = float(stroke_widths[i])
+            w = int(widths[i]) if widths is not None else int(shapes[i][1])
+            h = int(heights[i]) if heights is not None else int(shapes[i][0])
+            up = float(upscales[i]) if upscales is not None else 1.0
+            max_scale = max(1.0, cfg.max_native_enlargement / max(up, 1e-6))
+            g = KanaGlyph(
+                id=gid,
+                label=label,
+                path=path,
+                width=w,
+                height=h,
+                stroke_width=sw,
+                upscale=up,
+                max_scale=max_scale,
+                pack_index=i,
+            )
+            glyphs.append(g)
+
+        bank = cls(glyphs, cfg)
+        bank._flat_alphas = flat_alphas
+        bank._pack_offsets = offsets
+        bank._pack_shapes = shapes
+        return bank
+
+    @classmethod
     def load(cls, root: str | Path | None = None, cfg: KanaConfig | None = None) -> "KanaBank":
         cfg = cfg or KanaConfig()
         root = Path(root).expanduser() if root else cfg.root
+        if root.is_file() and root.name.endswith(".npz"):
+            return cls.from_npz(root, cfg)
+        for cand in ("kana_bank.npz", "glyphs.npz"):
+            npz_cand = root / cand
+            if npz_cand.is_file():
+                return cls.from_npz(npz_cand, cfg)
         manifest = root / "manifest.jsonl"
         glyphs = [g for row in iter_jsonl(manifest) if (g := glyph_from_record(root, row, cfg)) is not None]
         if not glyphs:
             rows = build_manifest(root, cfg)
             glyphs = [g for row in rows if (g := glyph_from_record(root, row, cfg)) is not None]
-        return cls(glyphs, cfg)
-
-    @classmethod
-    def from_records(
-        cls,
-        records: Iterable[dict[str, Any]],
-        root: str | Path,
-        cfg: KanaConfig | None = None,
-    ) -> "KanaBank":
-        cfg = cfg or KanaConfig()
-        root = Path(root)
-        glyphs = [g for r in records if (g := glyph_from_record(root, r, cfg)) is not None]
         return cls(glyphs, cfg)
 
     def _add(self, glyph: KanaGlyph) -> None:
@@ -234,6 +277,7 @@ class KanaBank:
                     reviewed=base.reviewed,
                     sha256=base.sha256,
                     source={**base.source, "derived": True, "derived_from_label": large},
+                    pack_index=base.pack_index,
                 )
                 self._add(derived)
 
@@ -323,7 +367,7 @@ class KanaBank:
         # Prefer the better-fitting glyphs but keep variety.
         weights = np.exp(-0.9 * np.arange(len(pool), dtype=np.float64))
         weights /= weights.sum()
-        if isinstance(rng, np.random.Generator):
+        if hasattr(rng, "choice"):
             index = int(rng.choice(len(pool), p=weights))
         else:
             index = int(rng.choices(range(len(pool)), weights=weights.tolist(), k=1)[0])
@@ -332,6 +376,12 @@ class KanaBank:
     # -- rendering --------------------------------------------------------
 
     def _alpha(self, glyph: KanaGlyph) -> np.ndarray:
+        idx = glyph.pack_index
+        if idx >= 0 and self._flat_alphas is not None and self._pack_offsets is not None and self._pack_shapes is not None:
+            off = int(self._pack_offsets[idx])
+            h, w = int(self._pack_shapes[idx][0]), int(self._pack_shapes[idx][1])
+            return self._flat_alphas[off : off + h * w].reshape((h, w))
+
         key = str(glyph.path)
         cached = self._alpha_cache.get(key)
         if cached is not None:

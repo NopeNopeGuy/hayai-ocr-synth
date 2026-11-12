@@ -346,10 +346,6 @@ class CnnScorer:
         probs, _ = _predict_loader(self.model, loader)
         return probs
 
-    def score_path(self, path: str | Path) -> float:
-        return float(self.score_paths([path])[0])
-
-
 def score_candidates(
     candidates_jsonl: str | Path,
     checkpoint: str | Path,

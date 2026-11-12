@@ -5,7 +5,7 @@
 - Python `>=3.9` (`pyproject.toml:6`)
 - OS: Linux (tested). No browser, no Rust toolchain, no temp-file pipeline.
 
-## Core dependencies (`manga_ocr_dev/requirements.txt`, `pyproject.toml:14-25`)
+## Core dependencies (`pyproject.toml:14-25`)
 
 | Package | Use |
 |---|---|
@@ -45,8 +45,7 @@ upscaler falls back to Lanczos without it.
 ```bash
 git clone https://github.com/your-username/manga-ocr-better-synth.git
 cd manga-ocr-better-synth
-pip install -r manga_ocr_dev/requirements.txt
-# or: pip install -e .   # installs manga-ocr-better-synth 0.2.0
+pip install -e .   # installs manga-ocr-better-synth 0.2.0
 pip install pytest  # for tests
 ```
 

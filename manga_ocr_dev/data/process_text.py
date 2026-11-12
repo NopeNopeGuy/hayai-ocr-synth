@@ -405,6 +405,80 @@ def _resolve_data_files(path_or_glob: str) -> list[str]:
     return []
 
 
+def _indices_array(ds):
+    """Return the underlying dataset indices for stable row IDs, if available."""
+    if hasattr(ds, "_indices") and ds._indices is not None:
+        try:
+            import numpy as np
+
+            return np.asarray(ds._indices.column(0))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _resolve_data_file_args(data_files: str | Sequence[str]) -> list[str]:
+    """Resolve one or many file paths / glob expressions to a flat file list."""
+    items = [data_files] if isinstance(data_files, str) else data_files
+    resolved: list[str] = []
+    for item in items:
+        resolved.extend(_resolve_data_files(item))
+    return resolved
+
+
+def _load_dataset_from_files(resolved: Sequence[str], streaming: bool):
+    """Load a local parquet/csv/json/text file set with the matching builder."""
+    from datasets import load_dataset
+
+    ext = Path(resolved[0]).suffix.lower()
+    builder = {
+        ".parquet": "parquet",
+        ".csv": "csv",
+        ".tsv": "csv",
+        ".json": "json",
+        ".jsonl": "json",
+        ".txt": "text",
+        ".text": "text",
+    }.get(ext, "parquet")
+    return load_dataset(builder, data_files=list(resolved), split="train", streaming=streaming)
+
+
+def _iter_novel_dataset(ds, source: str, min_len: int, max_len: int, include_extra: bool = False):
+    """Yield cleaned novel lines from an opened dataset."""
+    indices_arr = _indices_array(ds)
+    id_cnt = 0
+    for loop_idx, row in enumerate(ds):
+        chapter_idx = int(indices_arr[loop_idx]) if indices_arr is not None else None
+        primary_text = row.get("main_text") or row.get("text")
+        texts = [primary_text] if primary_text and isinstance(primary_text, str) else []
+        if include_extra:
+            for field in ("preface", "afterword", "maegaki", "atogaki", "synopsis"):
+                val = row.get(field)
+                if val and isinstance(val, str) and len(val) >= min_len:
+                    texts.append(val)
+
+        line_cnt = 0
+        for text in texts:
+            for line in split_novel_chapter(text, min_len=min_len, max_len=max_len):
+                id_cnt += 1
+                line_cnt += 1
+                row_id = f"{source}_{chapter_idx}_{line_cnt}" if chapter_idx is not None else f"{source}_{id_cnt}"
+                yield {"source": source, "id": row_id, "line": line}
+
+
+def _clean_stream_line(item: dict[str, str], strip_leading_quotes: bool, min_len: int, keep_lang: str | None):
+    """Normalize and filter a streamed line; return the cleaned text or ``None``."""
+    line_text = item["line"]
+    if strip_leading_quotes:
+        line_text = strip_leading_quote(line_text)
+    line_text = normalize_text(line_text)
+    if len(line_text) < min_len or not RE_VALID_CHAR.search(line_text):
+        return None
+    if keep_lang is not None and detect_line_lang(line_text) != keep_lang:
+        return None
+    return line_text
+
+
 class RollingDedup:
     """Rolling window de-duplicator to prevent repeating identical lines within a package."""
 
@@ -439,7 +513,10 @@ def iter_dialogue_lines(
     ``dialogue`` column. Older or local exports can still carry subtitle blocks with
     several entries or ASS ``\\N`` line breaks, which are split here.
     """
-    for row_idx, row in enumerate(ds):
+    indices_arr = _indices_array(ds)
+
+    for loop_idx, row in enumerate(ds):
+        row_idx = int(indices_arr[loop_idx]) if indices_arr is not None else loop_idx
         category = row.get("category") or split or source
         row_source = f"dialogue_{category}" if not str(category).startswith("dialogue_") else str(category)
 
@@ -466,30 +543,20 @@ def iter_novel_config(
     streaming: bool = True,
     min_len: int = 2,
     max_len: int = 150,
+    seed: int | None = None,
 ) -> Generator[dict[str, str], None, None]:
-    """Stream lines from a single novel config with minimal memory footprint."""
+    """Stream lines from a single novel config with minimal memory footprint.
+
+    When ``streaming=False`` and ``seed`` is given, the loaded dataset is shuffled
+    before iteration so that collected lines are sampled from the entire corpus.
+    """
     from datasets import load_dataset
 
     ds = load_dataset(dataset_name, config, split="train", streaming=streaming)
-    id_cnt = 0
-    for row in ds:
-        primary_text = row.get("main_text") or row.get("text")
-        extra_texts = []
-        for extra_field in ("preface", "afterword", "maegaki", "atogaki", "synopsis"):
-            val = row.get(extra_field)
-            if val and isinstance(val, str) and len(val) >= min_len:
-                extra_texts.append(val)
+    if hasattr(ds, "shuffle") and not streaming and seed is not None:
+        ds = ds.shuffle(seed=seed)
 
-        all_texts = ([primary_text] if primary_text and isinstance(primary_text, str) else []) + extra_texts
-
-        for t in all_texts:
-            for line in split_novel_chapter(t, min_len=min_len, max_len=max_len):
-                id_cnt += 1
-                yield {
-                    "source": f"novel_{config}",
-                    "id": f"novel_{config}_{id_cnt}",
-                    "line": line,
-                }
+    yield from _iter_novel_dataset(ds, f"novel_{config}", min_len, max_len, include_extra=True)
 
 
 def iter_dialogue_split(
@@ -498,11 +565,18 @@ def iter_dialogue_split(
     streaming: bool = True,
     min_len: int = 2,
     max_len: int = 200,
+    seed: int | None = None,
 ) -> Generator[dict[str, str], None, None]:
-    """Stream lines from one split of the Japanese Dialogue Dataset."""
+    """Stream lines from one split of the Japanese Dialogue Dataset.
+
+    When ``streaming=False`` and ``seed`` is given, the loaded dataset is shuffled
+    before iteration so that collected lines are sampled from the entire split.
+    """
     from datasets import load_dataset
 
     ds = load_dataset(dataset_name, split=split, streaming=streaming)
+    if hasattr(ds, "shuffle") and not streaming and seed is not None:
+        ds = ds.shuffle(seed=seed)
     yield from iter_dialogue_lines(ds, source=split, min_len=min_len, max_len=max_len, split=split)
 
 
@@ -513,37 +587,25 @@ def iter_dialogue_stream(
     data_files: str | Sequence[str] | None = None,
     min_len: int = 2,
     max_len: int = 200,
+    seed: int | None = None,
 ) -> Generator[dict[str, str], None, None]:
     """Stream dialogue lines from the Japanese Dialogue Dataset or local files.
 
     Splits are read round-robin so exported packages mix anime and drama dialogue
     instead of draining the largest split first.
+
+    When ``streaming=False`` and ``seed`` is given, each loaded split is shuffled
+    before iteration so that collected lines are sampled from the entire dataset.
     """
     from datasets import load_dataset
 
     if data_files:
-        if isinstance(data_files, str):
-            resolved = _resolve_data_files(data_files)
-        else:
-            resolved = []
-            for df in data_files:
-                resolved.extend(_resolve_data_files(df))
-
+        resolved = _resolve_data_file_args(data_files)
         if not resolved:
             raise FileNotFoundError(f"No dialogue data files found for {data_files}")
-
-        ext = Path(resolved[0]).suffix.lower()
-        if ext == ".parquet":
-            ds = load_dataset("parquet", data_files=resolved, split="train", streaming=streaming)
-        elif ext in {".csv", ".tsv"}:
-            ds = load_dataset("csv", data_files=resolved, split="train", streaming=streaming)
-        elif ext in {".json", ".jsonl"}:
-            ds = load_dataset("json", data_files=resolved, split="train", streaming=streaming)
-        elif ext in {".txt", ".text"}:
-            ds = load_dataset("text", data_files=resolved, split="train", streaming=streaming)
-        else:
-            ds = load_dataset("parquet", data_files=resolved, split="train", streaming=streaming)
-
+        ds = _load_dataset_from_files(resolved, streaming)
+        if hasattr(ds, "shuffle") and not streaming and seed is not None:
+            ds = ds.shuffle(seed=seed)
         yield from iter_dialogue_lines(ds, source="dialogue_local", min_len=min_len, max_len=max_len)
         return
 
@@ -556,6 +618,8 @@ def iter_dialogue_stream(
     for split in splits:
         try:
             ds = load_dataset(dataset_name, split=split, streaming=streaming)
+            if hasattr(ds, "shuffle") and not streaming and seed is not None:
+                ds = ds.shuffle(seed=seed)
         except Exception as e:  # noqa: BLE001
             print(f"Warning: could not load dialogue split '{split}': {e}", file=sys.stderr)
             continue
@@ -583,41 +647,24 @@ def iter_novel_stream(
     data_files: str | Sequence[str] | None = None,
     min_len: int = 2,
     max_len: int = 150,
+    seed: int | None = None,
 ) -> Generator[dict[str, str], None, None]:
-    """Stream novel lines across configs or local files with low memory usage."""
-    from datasets import load_dataset
+    """Stream novel lines across configs or local files with low memory usage.
 
+    When ``streaming=False`` and ``seed`` is given, each loaded dataset/config is
+    shuffled before iteration so that collected lines are sampled from the entire corpus.
+    """
     if isinstance(configs, str):
         configs = [c.strip() for c in configs.split(",") if c.strip()]
 
     if data_files:
-        if isinstance(data_files, str):
-            resolved = _resolve_data_files(data_files)
-        else:
-            resolved = []
-            for df in data_files:
-                resolved.extend(_resolve_data_files(df))
-
+        resolved = _resolve_data_file_args(data_files)
         if not resolved:
             raise FileNotFoundError(f"No novel data files found for {data_files}")
-
-        ext = Path(resolved[0]).suffix.lower()
-        if ext == ".parquet":
-            ds = load_dataset("parquet", data_files=resolved, split="train", streaming=streaming)
-        elif ext in {".json", ".jsonl"}:
-            ds = load_dataset("json", data_files=resolved, split="train", streaming=streaming)
-        elif ext in {".txt", ".text"}:
-            ds = load_dataset("text", data_files=resolved, split="train", streaming=streaming)
-        else:
-            ds = load_dataset("parquet", data_files=resolved, split="train", streaming=streaming)
-
-        id_cnt = 0
-        for row in ds:
-            primary_text = row.get("main_text") or row.get("text")
-            if primary_text and isinstance(primary_text, str):
-                for line in split_novel_chapter(primary_text, min_len=min_len, max_len=max_len):
-                    id_cnt += 1
-                    yield {"source": "novel_local", "id": f"novel_local_{id_cnt}", "line": line}
+        ds = _load_dataset_from_files(resolved, streaming)
+        if hasattr(ds, "shuffle") and not streaming and seed is not None:
+            ds = ds.shuffle(seed=seed)
+        yield from _iter_novel_dataset(ds, "novel_local", min_len, max_len)
         return
 
     # Cycle sequentially across configs (Hameln, Kakuyomu, Narou_NSFW, etc.)
@@ -629,6 +676,7 @@ def iter_novel_stream(
                 streaming=streaming,
                 min_len=min_len,
                 max_len=max_len,
+                seed=seed,
             )
         except Exception as e:  # noqa: BLE001
             print(f"Warning: config '{cfg}' encountered error: {e}", file=sys.stderr)
@@ -666,6 +714,40 @@ def iter_mixed_stream(
                 dialogue_alive = False
 
 
+def _collect_and_filter_lines(
+    stream: Iterator[dict[str, str]],
+    strip_leading_quotes: bool,
+    min_len: int,
+    keep_lang: str | None,
+    total_needed: int,
+) -> list[dict[str, str]]:
+    """Collect lines from a stream, applying cleaning, filtering, and dedup.
+
+    Collects up to ``total_needed`` unique lines (or exhausts the stream).
+    Uses a full set-based dedup instead of a rolling window so that the entire
+    collected corpus is duplicate-free before global shuffling.
+    """
+    seen: set[str] = set()
+    collected: list[dict[str, str]] = []
+
+    pbar = tqdm(total=total_needed, desc="Collecting lines")
+
+    for item in stream:
+        line_text = _clean_stream_line(item, strip_leading_quotes, min_len, keep_lang)
+        if line_text is None or line_text in seen:
+            continue
+
+        seen.add(line_text)
+        collected.append({"source": item["source"], "id": item["id"], "line": line_text})
+        pbar.update(1)
+
+        if len(collected) >= total_needed:
+            break
+
+    pbar.close()
+    return collected
+
+
 def export_lines(
     num_lines_in_each_package: int = 100_000,
     num_packages: int = 10,
@@ -674,7 +756,7 @@ def export_lines(
     dialogue_ratio: float = 0.5,
     dialogue_splits: str | Sequence[str] = DEFAULT_DIALOGUE_SPLITS,
     novel_configs: Sequence[str] = DEFAULT_NOVEL_CONFIGS,
-    streaming: bool = True,
+    streaming: bool = False,
     dialogue_dataset_name: str = DEFAULT_DIALOGUE_DATASET,
     novel_dataset_name: str = DEFAULT_NOVEL_DATASET,
     dialogue_data_dir: str | None = None,
@@ -689,6 +771,14 @@ def export_lines(
 ) -> list[Path]:
     """Export lines into packages for the synthetic data generator.
 
+    When ``streaming=False`` (the default), the full dataset is loaded, all
+    qualifying lines are collected, globally shuffled with ``seed``, and then
+    partitioned across packages so every package contains a unique, randomly
+    sampled subset of the data.
+
+    When ``streaming=True``, the legacy behaviour is used: a single iterator is
+    consumed sequentially into packages without global shuffling.
+
     :param num_lines_in_each_package: Number of text lines per package CSV. Default 100,000.
     :param num_packages: Total number of packages to generate. Default 10.
     :param start_package: Index of first package (e.g. 0 creates 0000.csv). Default 0.
@@ -699,7 +789,9 @@ def export_lines(
     :param novel_configs: Configs to use from Japanese-Novels-23M.
         Default: ('Narou_NSFW', 'Kakuyomu', 'Narou_SFW', 'Hameln', 'aozorabunko', 'novecomi', 'pixiv').
         Includes web novel sources (such as Narou_NSFW, Kakuyomu, Hameln).
-    :param streaming: Whether to stream data from HuggingFace without downloading the whole corpus.
+    :param streaming: If False (default), load the full dataset, shuffle globally,
+        and partition into packages for proper randomization. If True, use the
+        legacy streaming mode (sequential consumption, no global shuffle).
     :param dialogue_dataset_name: HuggingFace dataset name for dialogues.
     :param novel_dataset_name: HuggingFace dataset name for novels.
     :param dialogue_data_dir: Optional local path/glob to dialogue files (parquet/csv/txt).
@@ -707,8 +799,9 @@ def export_lines(
     :param out_dir: Output directory for packages. Defaults to DATA_SYNTHETIC_ROOT / 'lines'.
     :param min_len: Minimum line length in characters. Default 2.
     :param max_len: Maximum line length in characters. Default 150.
-    :param dedup_window: Size of rolling window for skipping exact duplicate lines. Default 50,000.
-    :param seed: Random seed for stream mixing.
+    :param dedup_window: Size of rolling window for skipping exact duplicate lines
+        (used only in streaming mode). Default 50,000.
+    :param seed: Random seed for shuffling and stream mixing.
     :param lang: Keep only lines of this language ('ja', 'ko', 'zh', 'en';
         script-detected per line). None (default) keeps every line. Useful to
         extract e.g. English lines from mixed corpora, or to build per-language
@@ -730,57 +823,104 @@ def export_lines(
         keep_lang = normalize_lang(lang)
 
     source_type = source_type.lower()
-    if source_type in {"dialogue", "subtitles"}:
-        stream = iter_dialogue_stream(
-            dataset_name=dialogue_dataset_name,
-            splits=dialogue_splits,
-            streaming=streaming,
-            data_files=dialogue_data_dir,
-            min_len=min_len,
-            max_len=max_len,
-        )
-    elif source_type in {"novel", "novels"}:
-        stream = iter_novel_stream(
-            dataset_name=novel_dataset_name,
-            configs=novel_configs,
-            streaming=streaming,
-            data_files=novel_data_dir,
-            min_len=min_len,
-            max_len=max_len,
-        )
-    elif source_type in {"both", "mixed", "all"}:
-        d_stream = iter_dialogue_stream(
-            dataset_name=dialogue_dataset_name,
-            splits=dialogue_splits,
-            streaming=streaming,
-            data_files=dialogue_data_dir,
-            min_len=min_len,
-            max_len=max_len,
-        )
-        n_stream = iter_novel_stream(
-            dataset_name=novel_dataset_name,
-            configs=novel_configs,
-            streaming=streaming,
-            data_files=novel_data_dir,
-            min_len=min_len,
-            max_len=max_len,
-        )
-        stream = iter_mixed_stream(
-            dialogue_iter=d_stream,
-            novel_iter=n_stream,
-            dialogue_ratio=dialogue_ratio,
-            seed=seed,
-        )
-    else:
-        raise ValueError(f"Unknown source_type '{source_type}'. Choose from 'both', 'dialogue', 'novel'.")
 
-    dedup = RollingDedup(window_size=dedup_window)
+    def _make_stream() -> Iterator[dict[str, str]]:
+        if source_type in {"dialogue", "subtitles"}:
+            return iter_dialogue_stream(
+                dataset_name=dialogue_dataset_name,
+                splits=dialogue_splits,
+                streaming=streaming,
+                data_files=dialogue_data_dir,
+                min_len=min_len,
+                max_len=max_len,
+                seed=seed,
+            )
+        elif source_type in {"novel", "novels"}:
+            return iter_novel_stream(
+                dataset_name=novel_dataset_name,
+                configs=novel_configs,
+                streaming=streaming,
+                data_files=novel_data_dir,
+                min_len=min_len,
+                max_len=max_len,
+                seed=seed,
+            )
+        elif source_type in {"both", "mixed", "all"}:
+            d_stream = iter_dialogue_stream(
+                dataset_name=dialogue_dataset_name,
+                splits=dialogue_splits,
+                streaming=streaming,
+                data_files=dialogue_data_dir,
+                min_len=min_len,
+                max_len=max_len,
+                seed=seed,
+            )
+            n_stream = iter_novel_stream(
+                dataset_name=novel_dataset_name,
+                configs=novel_configs,
+                streaming=streaming,
+                data_files=novel_data_dir,
+                min_len=min_len,
+                max_len=max_len,
+                seed=seed,
+            )
+            return iter_mixed_stream(
+                dialogue_iter=d_stream,
+                novel_iter=n_stream,
+                dialogue_ratio=dialogue_ratio,
+                seed=seed,
+            )
+        else:
+            raise ValueError(f"Unknown source_type '{source_type}'. Choose from 'both', 'dialogue', 'novel'.")
+
     created_files: list[Path] = []
 
     print(
         f"Exporting {num_packages} package(s) ({num_lines_in_each_package} lines each) "
         f"starting from package {start_package:04d} -> {out_dir}"
     )
+
+    if not streaming:
+        # ── Non-streaming path: collect all lines, globally shuffle, partition ──
+        total_needed = num_lines_in_each_package * num_packages
+        stream = _make_stream()
+
+        print(f"Loading full dataset (non-streaming) to collect up to {total_needed} lines...")
+        all_lines = _collect_and_filter_lines(
+            stream=stream,
+            strip_leading_quotes=strip_leading_quotes,
+            min_len=min_len,
+            keep_lang=keep_lang,
+            total_needed=total_needed,
+        )
+        print(f"Collected {len(all_lines)} unique lines. Shuffling with seed={seed}...")
+
+        rng = random.Random(seed)
+        rng.shuffle(all_lines)
+
+        for package_idx in range(start_package, start_package + num_packages):
+            package_str = f"{package_idx:04d}"
+            package_file = out_dir / f"{package_str}.csv"
+
+            pkg_offset = (package_idx - start_package) * num_lines_in_each_package
+            pkg_end = pkg_offset + num_lines_in_each_package
+            data = all_lines[pkg_offset:pkg_end]
+
+            if not data:
+                print(f"No data available for package {package_str}. Stopping.")
+                break
+
+            df = pd.DataFrame(data, columns=["source", "id", "line"])
+            df.to_csv(package_file, index=False)
+            print(f"Saved {len(df)} lines to {package_file}")
+            created_files.append(package_file)
+
+        gc.collect()
+        return created_files
+
+    # ── Legacy streaming path: sequential consumption with rolling dedup ──
+    stream = _make_stream()
+    dedup = RollingDedup(window_size=dedup_window)
 
     for package_idx in range(start_package, start_package + num_packages):
         package_str = f"{package_idx:04d}"
@@ -799,15 +939,8 @@ def export_lines(
                 print(f"Stream exhausted at package {package_str} ({len(data)} lines collected).")
                 break
 
-            line_text = item["line"]
-            if strip_leading_quotes:
-                line_text = strip_leading_quote(line_text)
-            line_text = normalize_text(line_text)
-            if len(line_text) < min_len or not RE_VALID_CHAR.search(line_text):
-                continue
-            if keep_lang is not None and detect_line_lang(line_text) != keep_lang:
-                continue
-            if dedup.is_duplicate(line_text):
+            line_text = _clean_stream_line(item, strip_leading_quotes, min_len, keep_lang)
+            if line_text is None or dedup.is_duplicate(line_text):
                 continue
 
             data.append({"source": item["source"], "id": item["id"], "line": line_text})

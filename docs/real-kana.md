@@ -166,9 +166,9 @@ single readable kana. Verification never changes the stage status: records
 remain `status="upscaled"` so `upright` still sees them. By default only
 doubtful glyphs are sent; `--all` audits everything.
 
-Gemini is never used to detect or recognise characters. The old
-`review`/`segment --review` paths remain only as compatibility aliases for the
-raw stage.
+Gemini is never used to detect or recognise characters. Raw-stage verification
+is available through `verify --stage raw --all`; the old `review` and
+`segment --review` aliases have been removed.
 
 Verification must run before `upright`/`build`. Re-running `upright` removes
 stale final glyphs left by an earlier build (for example a glyph the verifier

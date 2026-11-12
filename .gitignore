@@ -143,6 +143,7 @@ cython_debug/
 *.backup.*
 *.tmp.*
 *.checkpoint.*
+*.cache.pkl
 
 # Local-only datasets, models and scratch files (not part of the repo)
 /manga-ocr-charspot-small/

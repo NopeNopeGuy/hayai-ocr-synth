@@ -230,10 +230,6 @@ def relpath(path: Path, root: Path) -> str:
 # Image helpers
 
 
-def pil_from_bytes(data: bytes) -> Image.Image:
-    return Image.open(io.BytesIO(data)).convert("RGB")
-
-
 def load_image(path: str | os.PathLike[str], mode: str = "RGB") -> Image.Image:
     """Open a file, convert it and close the file handle immediately."""
 
@@ -379,12 +375,6 @@ def colour_separated_alpha(rgb: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]
     }
 
 
-def composite_on_white(rgba: Image.Image) -> Image.Image:
-    bg = Image.new("RGB", rgba.size, (255, 255, 255))
-    bg.paste(rgba.convert("RGB"), mask=rgba.getchannel("A"))
-    return bg
-
-
 def checkerboard(width: int, height: int, cell: int = 12, light: int = 255, dark: int = 210) -> Image.Image:
     yy, xx = np.mgrid[0:height, 0:width]
     board = np.where(((yy // cell + xx // cell) % 2) == 0, light, dark).astype(np.uint8)
@@ -436,8 +426,3 @@ def mask_to_rgba(
         out_rgb = np.zeros((*alpha.shape, 3), dtype=np.uint8)
         out_rgb[...] = np.asarray(ink_rgb, dtype=np.uint8)
     return Image.fromarray(np.dstack([out_rgb, alpha]), mode="RGBA")
-
-
-def seed_from(*parts: Any) -> int:
-    h = hashlib.sha256("|".join(str(p) for p in parts).encode("utf-8")).digest()
-    return int.from_bytes(h[:8], "little", signed=False) & 0x7FFFFFFF

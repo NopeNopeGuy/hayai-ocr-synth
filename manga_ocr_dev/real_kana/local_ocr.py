@@ -86,9 +86,6 @@ class CharspotOcr:
     def read(self, image: Image.Image | np.ndarray | str | Path) -> dict[str, Any]:
         return self._ocr.read(image)
 
-    def read_many(self, images: Sequence[Any]) -> list[dict[str, Any]]:
-        return self._ocr.read(list(images))
-
     def __call__(self, image: Image.Image | np.ndarray | str | Path) -> str:
         return self._ocr(image)
 

@@ -2,7 +2,7 @@
 
 Package init re-exports the public surface (`manga_ocr_dev/data/__init__.py:1-25`): `export_dialogue, export_lines, clean_dialogue_line, clean_novel_text, detect_line_lang, iter_dialogue_split, iter_dialogue/novel/mixed_stream, split_novel_chapter`.
 
-## `process_text.py` (623 lines) — canonical exporter
+## `process_text.py` (969 lines) — canonical exporter
 
 `fire.Fire(export_lines)`; all flags map 1:1 to `export_lines(...)` params.
 
@@ -35,12 +35,12 @@ python -m manga_ocr_dev.data.process_text --source_type=dialogue --dialogue_rati
 python -m manga_ocr_dev.data.process_text --source_type=dialogue --dialogue_splits=anime_tv,drama_tv
 ```
 
-## `process_dialogue.py` (82 lines) — dialogue convenience wrapper
+## `process_dialogue.py` (85 lines) — dialogue convenience wrapper
 
 - `export_dialogue(...)` — identical signature to `export_lines` but defaults `source_type="dialogue", max_len=200`; forwards everything unchanged. `fire.Fire(export_dialogue)`.
 - Exists so `python -m manga_ocr_dev.data.process_dialogue --num_packages=10` needs no `source_type` flag.
 
-## `process_cc100.py` (85 lines) — CC-100 slicer for ko/zh/en
+## `process_cc100.py` (86 lines) — CC-100 slicer for ko/zh/en
 
 - `CC100_FILES = {"ja": ["ja.txt"], "ko": ["ko.txt"], "zh": ["zh-Hans.txt", ...], "en": ["en.txt"]}`
 - `export_lines(num_lines_in_each_package=100000, num_packages=10, lang="ja", out_dir=None)` — reads first existing `DATA_SYNTHETIC_ROOT/<candidate>`, skips `len<=2`, sequential `id_count` across packages, writes `lines/` for `ja` else `lines_<lang>/` (matches `run_generate --lang` convention) with `source=cc-100-<lang>`. No cleaning/dedup/lang-detect. `fire.Fire(export_lines)`.

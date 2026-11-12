@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import gc
 import multiprocessing as mp
 import os
 
@@ -256,7 +255,7 @@ def run(
         mp_context=mp_context,
         initializer=_init_worker,
         initargs=(worker_kana_bank, bool(real_kana), real_kana_prob),
-        max_tasks_per_child=1500,
+        max_tasks_per_child=10000,
     )
     try:
         with tqdm(total=total, desc=desc, unit="img") as pbar:
@@ -279,10 +278,6 @@ def run(
                             f.flush()
                     pbar.update(1)
                 f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    pass
     except KeyboardInterrupt:
         ex.shutdown(wait=False, cancel_futures=True)
         try:

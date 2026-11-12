@@ -37,9 +37,8 @@ manga_ocr_dev/
     generate_backgrounds.py    # Manga109-s text-free crops
     generate_backgrounds_animetext.py  # AnimeText text-free crops (recommended)
   synthetic_data_generator/
-    renderer.py                # Pillow renderer (3006 lines): uniform/irregular/SFX layouts
-    generator_legacy.py        # base multilingual generator (988 lines)
-    generator.py               # hard-dialogue wrapper (furigana 0.70)
+    renderer.py                # Pillow renderer (2861 lines): uniform/irregular/SFX layouts
+    generator.py        # multilingual generator + hard-dialogue sampling
     run_generate.py            # multiprocess batch driver (fire CLI)
     sfx_text.py                # procedural SFX composer (ja/ko/zh/en)
     lang.py                    # per-language typographic config
@@ -67,7 +66,7 @@ docs/                          # this documentation
 ## Quick start
 
 ```bash
-pip install -r manga_ocr_dev/requirements.txt
+pip install -e .
 export FONTS_ROOT="/path/to/japanese/fonts"
 export DATA_SYNTHETIC_ROOT="/path/to/output/synthetic_data"
 

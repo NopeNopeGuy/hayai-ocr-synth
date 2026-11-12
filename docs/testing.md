@@ -2,17 +2,17 @@
 
 Run: `pytest tests/ -v` (`pyproject.toml:44-45` sets `testpaths=["tests","manga_ocr_dev"]`).
 
-## `tests/test_process_text.py` (132 lines)
+## `tests/test_process_text.py` (273 lines)
 
 - `test_clean_dialogue_line_subtitles`, `test_clean_novel_text_aozora`, `test_split_novel_chapter`, `test_rolling_dedup`, `test_iter_mixed_stream`, `test_export_lines_local_mock` (local `dummy_dialogue.txt` → `0000.csv`, 3 rows, checks `source,id,line` schema).
 - Verifies ASS/HTML/speaker/music/quote handling and packaging. No network (local mock). 6 tests pass.
 
-## `tests/test_pil_renderer.py` (602 lines, ~30 tests)
+## `tests/test_pil_renderer.py` (767 lines, ~30 tests)
 
 Covers `_parse_line` (ruby/tcy), BGRA output, vertical-rl vs horizontal ordering, stroke/shadow/ruby/tcy ink, `full_render` grayscale vs color BGR, irregular/slant/SFX (`persp/curve/speedlines/burst/double_outline`), color sampling (`solid/per_line/per_char`, contrast/outline legibility), `get_background_df` with/without manifest.
 Requires `/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc` else skipped.
 
-## `tests/test_multilingual.py` (311 lines)
+## `tests/test_multilingual.py` (328 lines)
 
 - `test_supported_langs`, `test_normalize_lang_aliases`, `test_detect_lang_scripts`, `test_vertical_probs_ordering`, `test_*_sfx_composer_vocab_only[ko|zh|en]`, `test_detect_line_lang_wrapper`, `test_export_lines_lang_filter` (mixed ja/ko/zh/en txt → `lines_ko` keeps 1 Korean line), `test_renderer_renders_each_language`, `test_renderer_vertical_distribution_per_lang`, `test_sfx_renders_each_language`, `test_generator_*_per_lang/auto_detects`.
 - Validates `lang.py` + `process_text` lang filter + per-lang rendering.

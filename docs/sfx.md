@@ -1,4 +1,4 @@
-# SFX text (`manga_ocr_dev/synthetic_data_generator/sfx_text.py`, 676 lines)
+# SFX text (`manga_ocr_dev/synthetic_data_generator/sfx_text.py`, 673 lines)
 
 Procedural unbounded onomatopoeia generator — avoids fixed-lexicon repetition. Every output is vocab/`is_drawable`-gated and tail-decorated, `max_len`-enforced, returning `None` on failure.
 
@@ -16,7 +16,7 @@ Procedural unbounded onomatopoeia generator — avoids fixed-lexicon repetition.
 `_burst/_impact/_crash/_repeat/_alt_repeat/_geminate/_tail_ri/_stretch/_breath/_stutter` + compound 12%, then `_add_tails`. Validates `1<=len<=max_len` and `all(c in vocab)`.
 
 - `_mutate(s, pool)` — 1–3 edits: voicing flip, stretch, repeat, ending swap, geminate, compound, truncate.
-- Mora tables `_ROWS/_ONSET_W/_VOWEL_W` with yoon/foreign/small-vowel handling; `_long_or`, `_get_pool`.
+- Mora tables `_ROWS/_ONSET_W/_VOWEL_W` with yoon/foreign/small-vowel handling; `_get_pool`.
 - Helpers: `_to_hira/_to_kata`, `_vowel_of`, `_voice/_devoice`, `_rand`, `_ok_checker(vocab, font_path)` (vocab or `is_drawable` fallback), `_filter_tails`.
 
 Tails: `SFX_ELONG_TAILS` (`ー/ッ/〜`), `SFX_MARK_TAILS` (`♡♥★`, `~~~`, `……`, `!!!`) — see `lang.py`.

@@ -77,15 +77,6 @@ AUTO_PRESET = {
     "sfx": "sfx",
     "handwritten": "handwritten",
 }
-EXPECTED_FEATURES = [
-    ("image", "image"),
-    ("transcription", "string"),
-    ("language", "string"),
-    ("source", "string"),
-    ("image_id", "string"),
-    ("vertical", "bool"),
-]
-
 _ENGINE = None
 
 
@@ -105,12 +96,6 @@ def _now_run_id() -> str:
 def _sanitize(value: Any, max_len: int = 60) -> str:
     text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_.-")
     return (text or "x")[:max_len]
-
-
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _tri(value: str | None) -> str:
@@ -557,23 +542,6 @@ def _worker_generate(job: tuple) -> dict:
         return _ENGINE.render(job)  # type: ignore[union-attr]
     except Exception:  # noqa: BLE001
         return {"error": traceback.format_exc(), "image_id": job[4], "index": job[0]}
-
-
-def _background_df(args: argparse.Namespace):
-    from manga_ocr_dev.synthetic_data_generator.utils import get_background_df
-
-    if args.backgrounds:
-        path = Path(args.backgrounds).expanduser()
-        df = get_background_df(path)
-        if df.empty:
-            raise RuntimeError(f"no background crops found in {path}")
-        return df
-    from manga_ocr_dev.synthetic_data_generator.renderer import get_default_background_df
-
-    df = get_default_background_df()
-    if df.empty:
-        raise RuntimeError("no default backgrounds found; pass --backgrounds")
-    return df
 
 
 def _hand_fonts():

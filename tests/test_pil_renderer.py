@@ -6,6 +6,7 @@ import pytest
 
 from manga_ocr_dev.synthetic_data_generator.renderer import (
     Renderer,
+    _graphemes,
     _parse_line,
 )
 
@@ -44,6 +45,23 @@ def test_parse_plain_line():
     assert _parse_line("あいう") == [("text", "あいう")]
 
 
+def test_graphemes_attach_combining_marks():
+    # U+3099 has no precomposed form with the small kana, so it must stay
+    # attached to its base instead of becoming a standalone layout cell.
+    assert _graphemes("わぃ\u3099") == ["わ", "ぃ\u3099"]
+    assert _graphemes("か\u3099") == ["か\u3099"]
+    assert _graphemes("あい") == ["あ", "い"]
+
+
+def test_combining_mark_does_not_take_its_own_cell():
+    r = make_renderer()
+    css = dict(BASE_CSS, font_size=48, shadow_size=0, slant=0.0, line_height=0.0, hollow=False)
+    plain, _ = r.render_text(["わぃ"], css)
+    marked, _ = r.render_text(["わぃ\u3099"], css)
+    # A vertical column is one cell per grapheme: the dakuten rides on ぃ.
+    assert marked.shape[1] == plain.shape[1]
+
+
 def test_render_text_returns_bgra():
     r = make_renderer()
     img, params = r.render_text(["あいう", "えお"], dict(BASE_CSS))
@@ -77,10 +95,10 @@ def test_horizontal_rows_ordered_top_to_bottom():
 
 def test_stroke_adds_ink_vs_plain():
     r = make_renderer()
-    # shadow_size pinned: a sampled shadow blur would inflate the alpha-pixel
+    # font_size and shadow_size pinned: a sampled shadow blur would inflate the alpha-pixel
     # count and drown out the stroke-vs-plain comparison.
-    plain, _ = r.render_text(["あいう"], dict(BASE_CSS, shadow_size=0))
-    stroked, _ = r.render_text(["あいう"], dict(BASE_CSS, stroke_size=3, stroke_color="white", shadow_size=0))
+    plain, _ = r.render_text(["あいう"], dict(BASE_CSS, font_size=48, shadow_size=0))
+    stroked, _ = r.render_text(["あいう"], dict(BASE_CSS, font_size=48, stroke_size=3, stroke_color="white", shadow_size=0))
     assert (stroked[:, :, 3] > 0).sum() > (plain[:, :, 3] > 0).sum()
 
 
@@ -459,6 +477,33 @@ def test_full_render_never_upscales(tmp_path):
     assert max(img.shape) < r.max_size
 
 
+def test_text_visibility_detects_invisible_ink():
+    bg = np.full((32, 32, 3), 255, dtype=np.uint8)
+    ink = np.zeros((32, 32, 4), dtype=np.uint8)
+    ink[8:24, 8:24] = (0, 0, 0, 255)
+    assert Renderer._text_visibility(ink, bg)["visible_frac"] == 1.0
+
+    same = np.full((32, 32, 4), 255, dtype=np.uint8)
+    same[:, :, 3] = ink[:, :, 3]
+    assert Renderer._text_visibility(same, bg)["visible_frac"] == 0.0
+
+
+def test_quality_gate_rejects_tiny_text(tmp_path):
+    from manga_ocr_dev.synthetic_data_generator.renderer import DegenerateSampleError
+
+    r = _bg_renderer(tmp_path)
+    with pytest.raises(DegenerateSampleError, match="text too small"):
+        r.render(["あいうえお"], dict(BASE_CSS, font_size=4))
+
+
+def test_quality_gate_rejects_extreme_strip(tmp_path):
+    from manga_ocr_dev.synthetic_data_generator.renderer import DegenerateSampleError
+
+    r = _bg_renderer(tmp_path)
+    with pytest.raises(DegenerateSampleError, match="aspect ratio"):
+        r.render(["あ" * 80], dict(BASE_CSS, vertical=False, font_size=48))
+
+
 def test_solid_color_text_returns_bgr():
 
     r = make_renderer()
@@ -607,6 +652,68 @@ def test_contrast_helpers_and_legible_outline():
         {"text_color": "black", "stroke_size": 2, "stroke_color": "white", "color_mode": "solid"}
     )
     assert p["stroke_color"] == "white"
+
+
+def test_hollow_uses_requested_stroke_color():
+    """Hollow text is only an outline; its stroke colour must be honoured."""
+    r = make_renderer()
+    np.random.seed(0)
+    img, _ = r.render_text(
+        ["あいう"],
+        dict(BASE_CSS, font_size=48, stroke_size=2, stroke_color="black", hollow=True, faint=False, shadow_size=0),
+    )
+    opaque = img[:, :, 3] > 200
+    assert opaque.any()
+    # Before the fix the per-op contrasting stroke (white for black text) won,
+    # drawing an invisible white outline instead of the requested black one.
+    assert img[:, :, :3][opaque].mean() < 80
+
+
+def test_ink_edge_detects_faint_ink():
+    """Faint ink has alpha < 200 but must still inform bubble/background colour."""
+    r = make_renderer()
+    np.random.seed(0)
+    img, _ = r.render_text(
+        ["あいう"],
+        dict(
+            BASE_CSS,
+            font_size=48,
+            stroke_size=2,
+            stroke_color="white",
+            hollow=True,
+            faint=True,
+            faint_alpha=0.4,
+            shadow_size=0,
+        ),
+    )
+    assert img[:, :, 3].max() < 200
+    edge_lum, edge_ring = Renderer._ink_edge(img)
+    assert edge_lum is not None and edge_lum > 200
+    assert edge_ring is not None and edge_ring.any()
+
+
+def test_faint_white_hollow_text_is_not_invisible_on_bubble(tmp_path):
+    """Regression: white faint hollow ink must not be paired with a white bubble."""
+    r = _bg_renderer(tmp_path)
+    css = dict(
+        BASE_CSS,
+        font_size=40,
+        stroke_size=2,
+        stroke_color="white",
+        hollow=True,
+        faint=True,
+        faint_alpha=0.5,
+        shadow_size=0,
+        draw_bubble=True,
+        tight=False,
+    )
+    np.random.seed(0)
+    img, _ = r.render(["あいうえおかきくけこ"], css)
+    h, w = img.shape[:2]
+    interior = img[h // 10 : h * 9 // 10, w // 5 : w * 4 // 5]
+    # The bubble must switch to a contrasting fill instead of leaving almost
+    # white outline ink on a white bubble (median ~236 before the fix).
+    assert np.median(interior) < 150
 
 
 def test_get_background_df_with_manifest(tmp_path):

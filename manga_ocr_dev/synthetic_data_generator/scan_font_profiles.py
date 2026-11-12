@@ -4,22 +4,17 @@ Scans all fonts under FONTS_ROOT (all 19,000+ fonts), classifies them into manga
 typographic archetypes, omits non-manga / office / easy / system fonts, assigns
 recommended sizing and border parameters based on type, and writes:
   - assets/font_profiles.json (fast runtime lookup)
-  - assets/font_profiles.csv (metadata report)
   - assets/fonts.csv (updated with priority labels & new fonts)
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import os
-import re
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import pandas as pd
-from fontTools.ttLib import TTFont
-from tqdm import tqdm
 
 from manga_ocr_dev.env import ASSETS_PATH, FONTS_ROOT
 from manga_ocr_dev.synthetic_data_generator.scan_fonts import process as scan_font_chars
@@ -449,14 +444,12 @@ def main():
     print(f"Total font files found on disk: {len(all_fonts)}")
 
     profiles = {}
-    rows = []
     type_counts = {}
     priority_counts = {}
 
     for rel in all_fonts:
         prof = profile_single_font(rel)
         profiles[rel] = prof
-        rows.append(prof)
         ft = prof["font_type"]
         pr = prof["priority"]
         type_counts[ft] = type_counts.get(ft, 0) + 1
@@ -476,13 +469,7 @@ def main():
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(profiles, f, ensure_ascii=False, indent=2)
 
-    # 2. Write assets/font_profiles.csv
-    csv_path = ASSETS_PATH / "font_profiles.csv"
-    print(f"Writing {csv_path}...")
-    df = pd.DataFrame(rows)
-    df.to_csv(csv_path, index=False)
-
-    # 3. Update assets/fonts.csv
+    # 2. Update assets/fonts.csv
     fonts_csv_path = ASSETS_PATH / "fonts.csv"
     update_fonts_csv_with_profiles(profiles, fonts_csv_path)
 

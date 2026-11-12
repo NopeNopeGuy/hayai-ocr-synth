@@ -202,5 +202,72 @@ def test_export_lines_local_mock():
         df = pd.read_csv(pkg_file)
         assert list(df.columns) == ["source", "id", "line"]
         assert len(df) == 3
-        # Check that lines contain cleaned text
-        assert any("こんにちは、世界!" in str(l) for l in df["line"])
+        # Check that lines contain cleaned text (e.g. quotes stripped or punctuation normalized)
+        assert any(l in df["line"].values for l in ["こんにちは、世界!", "大丈夫?", "Yes, absolutely!"])
+
+
+def test_export_lines_shuffles_before_collect():
+    """Verify that non-streaming export shuffles the full dataset before collecting."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        dialogue_file = tmp_path / "dummy_corpus.txt"
+        # 100 distinct lines
+        raw_lines = [f"テスト発言番号{i:03d}" for i in range(100)]
+        dialogue_file.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+
+        out_lines_dir = tmp_path / "lines"
+        created_files = export_lines(
+            num_lines_in_each_package=10,
+            num_packages=2,
+            start_package=0,
+            source_type="dialogue",
+            dialogue_data_dir=str(dialogue_file),
+            out_dir=out_lines_dir,
+            streaming=False,
+            min_len=2,
+            seed=42,
+        )
+
+        assert len(created_files) == 2
+        df0 = pd.read_csv(created_files[0])
+        df1 = pd.read_csv(created_files[1])
+
+        # Packages must contain 10 lines each
+        assert len(df0) == 10
+        assert len(df1) == 10
+
+        # Lines in package 0 must not just be the first 10 lines of the dataset
+        first_10 = set(raw_lines[:10])
+        pkg0_lines = set(df0["line"])
+        assert pkg0_lines != first_10
+        # Should sample lines from deeper in the corpus (> index 20)
+        assert any(int(line.replace("テスト発言番号", "")) > 20 for line in pkg0_lines)
+
+        # No overlap between packages
+        pkg1_lines = set(df1["line"])
+        assert pkg0_lines.isdisjoint(pkg1_lines)
+
+
+def test_iter_dialogue_lines_preserves_shuffled_dataset_indices():
+    """Verify that iter_dialogue_lines uses original dataset indices from ds._indices."""
+    import pyarrow as pa
+    from manga_ocr_dev.data.process_text import iter_dialogue_lines
+
+    class MockShuffledDataset:
+        def __init__(self, original_indices, dialogues):
+            self.dialogues = dialogues
+            self._indices = pa.Table.from_arrays([pa.array(original_indices, type=pa.int64())], names=["indices"])
+
+        def __iter__(self):
+            for d in self.dialogues:
+                yield {"dialogue": d, "category": "anime_tv"}
+
+    mock_ds = MockShuffledDataset(
+        original_indices=[548_291, 12_894_120],
+        dialogues=["こんにちは", "さようなら"],
+    )
+
+    rows = list(iter_dialogue_lines(mock_ds))
+    assert len(rows) == 2
+    assert rows[0]["id"] == "dialogue_anime_tv_548291_1"
+    assert rows[1]["id"] == "dialogue_anime_tv_12894120_1"
