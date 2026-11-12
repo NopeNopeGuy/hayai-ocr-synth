@@ -113,11 +113,72 @@ _EXCLUDE_HIRA = set("゙゚゛゜ゝゞ゠ー")
 _EXCLUDE_KATA = set("゙゚゛゜゠")
 
 
+def is_git_lfs_pointer(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size > 1024:
+        return False
+    try:
+        with open(path, "rb") as f:
+            return b"version https://git-lfs.github.com/spec/v1" in f.read(100)
+    except Exception:
+        return False
+
+
+def ensure_asset_file(path: Path) -> Path:
+    """Ensure asset file is resolved (not missing, empty, or an LFS pointer)."""
+    path = Path(path)
+    if path.is_file() and not is_git_lfs_pointer(path):
+        return path
+
+    repo_dir = path.parent.parent
+    # 1. Try git lfs pull
+    try:
+        import subprocess
+
+        rel = f"assets/{path.name}"
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "lfs", "pull", "--include", rel],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:
+        pass
+
+    if path.is_file() and not is_git_lfs_pointer(path):
+        return path
+
+    # 2. Download from Hugging Face dataset fallback
+    try:
+        import os
+        import shutil
+        from huggingface_hub import hf_hub_download
+
+        token = os.environ.get("HF_TOKEN")
+        downloaded = hf_hub_download(
+            repo_id="JustANormalTinkerer/manga-ocr-multilingual-fonts",
+            filename=f"assets/{path.name}",
+            repo_type="dataset",
+            token=token,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(downloaded, path)
+        return path
+    except Exception as e:
+        warnings.warn(f"Failed to fetch asset {path.name} from HF fallback: {e}")
+
+    return path
+
+
 @lru_cache(maxsize=2)
 def get_charsets(vocab_path=None):
     if vocab_path is None:
-        vocab_path = ASSETS_PATH / "vocab.csv"
-    vocab = pd.read_csv(vocab_path).char.values
+        vocab_path = ensure_asset_file(ASSETS_PATH / "vocab.csv")
+    else:
+        vocab_path = ensure_asset_file(Path(vocab_path))
+    df = pd.read_csv(vocab_path)
+    if "char" not in df.columns:
+        raise ValueError(f"vocab file {vocab_path} missing 'char' column (columns={list(df.columns)})")
+    vocab = df.char.values
     hiragana = np.array([c for c in vocab if is_hiragana(c) and c not in _EXCLUDE_HIRA])
     katakana = np.array([c for c in vocab if is_katakana(c) and c not in _EXCLUDE_KATA])
     return vocab, hiragana, katakana
@@ -230,7 +291,7 @@ def get_font_meta():
         return _GLOBAL_FONT_META
 
     cache_file = ASSETS_PATH / "fonts.cache.pkl"
-    csv_file = ASSETS_PATH / "fonts.csv"
+    csv_file = ensure_asset_file(ASSETS_PATH / "fonts.csv")
     if cache_file.is_file() and csv_file.is_file():
         try:
             if cache_file.stat().st_mtime >= csv_file.stat().st_mtime:

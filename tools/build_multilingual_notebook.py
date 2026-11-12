@@ -252,9 +252,22 @@ def locate_repo() -> Path:
             return c.resolve()
 
     target = Path("/content/hayai-ocr-synth" if IN_COLAB else "/kaggle/working/hayai-ocr-synth")
-    print(f"Cloning generator repository into {target}...")
     import subprocess
-    subprocess.check_call(["git", "clone", "--depth", "1", REPO_URL, str(target)])
+    if not (target / "manga_ocr_dev").is_dir():
+        print(f"Cloning generator repository into {target}...")
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO_URL, str(target)])
+    else:
+        print(f"Updating existing repository at {target}...")
+        try:
+            subprocess.run(["git", "-C", str(target), "pull", "--ff-only"], check=False)
+        except Exception:
+            pass
+
+    # Ensure Git LFS pointers are resolved
+    try:
+        subprocess.run(["git", "-C", str(target), "lfs", "pull"], check=False)
+    except Exception:
+        pass
     return target.resolve()
 
 REPO_DIR = locate_repo()

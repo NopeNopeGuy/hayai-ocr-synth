@@ -29,6 +29,7 @@ from manga_ocr_dev.synthetic_data_generator.sfx_text import (
     SFXComposer,
 )
 from manga_ocr_dev.synthetic_data_generator.utils import (
+    ensure_asset_file,
     font_supports_text_cmap,
     get_charsets,
     get_font_cmap_chars,
@@ -86,7 +87,7 @@ class SyntheticDataGenerator:
     ):
         self.vocab, self.hiragana, self.katakana = get_charsets()
         self.vocab_set = set(self.vocab.tolist())
-        self.len_to_p = pd.read_csv(ASSETS_PATH / "len_to_p.csv")
+        self.len_to_p = pd.read_csv(ensure_asset_file(ASSETS_PATH / "len_to_p.csv"))
         self._len_vals = self.len_to_p.len.to_numpy()
         self._len_probs = self.len_to_p.p.to_numpy()
 
