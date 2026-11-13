@@ -285,12 +285,18 @@ class SyntheticDataGenerator:
             raise RuntimeError("font_map is empty: run scan_fonts.py first")
         cover = self.font_map.coverage(need)
         paths = self.font_map.paths
-        good = [paths[i] for i in np.flatnonzero(cover >= thresh)]
+        mask = self._is_manga_mask
+        good = [paths[i] for i in np.flatnonzero(mask & (cover >= thresh))]
         if extra_check is not None:
             good = [p for p in good if extra_check(p)]
         if not good:
-            best = cover.max()
-            good = [paths[i] for i in np.flatnonzero(cover >= best - 1e-9)]
+            avail = np.flatnonzero(mask)
+            if len(avail):
+                best = cover[avail].max()
+                good = [paths[i] for i in avail[cover[avail] >= best - 1e-9]]
+            else:
+                best = cover.max()
+                good = [paths[i] for i in np.flatnonzero(cover >= best - 1e-9)]
             if extra_check is not None:
                 checked = [p for p in good if extra_check(p)]
                 good = checked or good
@@ -329,6 +335,8 @@ class SyntheticDataGenerator:
                 break
             if pre_cover[idx] < 0.30:
                 break
+            if not self._is_manga_mask[int(idx)]:
+                continue
             p = paths[int(idx)]
             try:
                 cmap = get_font_cmap_chars(p)
@@ -342,6 +350,8 @@ class SyntheticDataGenerator:
         if not good:
             scored = []
             for idx in order[:200]:
+                if not self._is_manga_mask[int(idx)]:
+                    continue
                 p = paths[int(idx)]
                 hit = self._cmap_hit(p, need)
                 if hit is None:
