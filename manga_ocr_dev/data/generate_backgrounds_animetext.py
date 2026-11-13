@@ -59,7 +59,7 @@ def generate_backgrounds_animetext(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.RandomState(seed)
-    ds = load_dataset("deepghs/AnimeText", split=split, streaming=True)
+    ds = load_dataset("deepghs/AnimeText", split=split, streaming=True, num_proc=32)
 
     manifest = []
     n_seen = n_kept = n_attempts = n_skipped_full = 0
