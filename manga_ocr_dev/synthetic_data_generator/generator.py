@@ -759,13 +759,19 @@ class SyntheticDataGenerator:
     def words_to_lines(self, words, lang="ja"):
         lang = normalize_lang(lang)
         if lang in ("ko", "en"):
-            return self._words_to_lines_spaced(words)
+            return self._words_to_lines_spaced(words, lang=lang)
         text = "".join(words)
 
         max_num_lines = 10
         min_line_len = len(text) // max_num_lines
-        max_line_len = 20
-        max_line_len = np.clip(np.random.poisson(6), max(1, min_line_len), max_line_len)
+        max_line_cap = 22 if lang == "zh" else 20
+        target_poisson = 10 if lang == "zh" else 7
+        floor_len = 4 if lang == "zh" else 1
+        max_line_len = np.clip(
+            np.random.poisson(target_poisson),
+            max(floor_len, min_line_len),
+            max_line_cap,
+        )
         lines = []
         line = ""
         for word in words:
@@ -779,7 +785,9 @@ class SyntheticDataGenerator:
         return lines
 
     @staticmethod
-    def _words_to_lines_spaced(words):
+    def _words_to_lines_spaced(words, lang="en"):
+        import math
+
         tokens: list[str] = []
         for w in words:
             parts = str(w).split("\n")
@@ -788,9 +796,23 @@ class SyntheticDataGenerator:
                     tokens.append(tok)
                 if i < len(parts) - 1:
                     tokens.append("\n")
+
         total_chars = sum(len(t) for t in tokens if t != "\n") + max(0, len(tokens) - 1)
-        ideal_w = round((max(1, total_chars) * float(np.random.uniform(2.0, 3.2))) ** 0.5)
-        max_line_len = int(np.clip(ideal_w, 12, 28))
+        if lang == "en":
+            ideal_w = round((max(1, total_chars) * float(np.random.uniform(6.5, 13.0))) ** 0.5)
+            max_line_len = int(np.clip(ideal_w, 22, 42))
+            min_wrap = 14
+            hard_cap = max(44, max_line_len)
+        else:
+            ideal_w = round((max(1, total_chars) * float(np.random.uniform(3.2, 6.0))) ** 0.5)
+            max_line_len = int(np.clip(ideal_w, 15, 30))
+            min_wrap = 12
+            hard_cap = max(36, max_line_len)
+
+        if "\n" not in tokens and total_chars > max_line_len:
+            n_lines = max(2, math.ceil(total_chars / max_line_len))
+            max_line_len = max(min_wrap, min(max_line_len, math.ceil(total_chars / n_lines) + 4))
+
         lines, line = [], ""
         for tok in tokens:
             if tok == "\n":
@@ -801,15 +823,15 @@ class SyntheticDataGenerator:
             candidate = tok if not line.strip() else line + " " + tok
             if len(candidate) > max_line_len and line.strip():
                 lines.append(line.strip())
-                while len(tok) > 24:
-                    lines.append(tok[:24])
-                    tok = tok[24:]
+                while len(tok) > hard_cap:
+                    lines.append(tok[:hard_cap])
+                    tok = tok[hard_cap:]
                 line = tok
             else:
                 line = candidate
-            while len(line) > 24:
-                lines.append(line[:24].strip())
-                line = line[24:].lstrip()
+            while len(line) > hard_cap:
+                lines.append(line[:hard_cap].strip())
+                line = line[hard_cap:].lstrip()
         if line.strip():
             lines.append(line.strip())
         glued = [re.sub(r"\s+([.,!?;:…%‰\)\]\}’”\"»])", r"\1", ln) for ln in lines]

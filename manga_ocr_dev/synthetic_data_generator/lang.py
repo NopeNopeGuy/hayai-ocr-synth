@@ -21,7 +21,7 @@ SUPPORTED_LANGS = ("ja", "ko", "zh", "en")
 # vertical; Korean webtoons and English comics are (near-)always horizontal.
 DIALOGUE_VERTICAL_PROB = {
     "ja": 0.70,
-    "zh": 0.12,
+    "zh": 0.35,
     "ko": 0.02,
     "en": 0.0,
 }
@@ -29,7 +29,7 @@ DIALOGUE_VERTICAL_PROB = {
 # Vertical-text probability per language for SFX lettering.
 SFX_VERTICAL_PROB = {
     "ja": 0.40,
-    "zh": 0.15,
+    "zh": 0.25,
     "ko": 0.05,
     "en": 0.0,
 }
@@ -98,6 +98,7 @@ SFX_BASES = {
 咚咚咚 啪啪啪 轰轰轰 哗啦啦 呼呼 飕飕 嗖嗖 沙沙 淅淅 簌簌 咔嚓
 哐当 乒乓 噼啪 噼里啪啦 咕嘟 扑哧 嘿咻 加油 冲 杀 嗷嗷 汪汪
 喵喵 咩咩 哞哞 喔喔 咯咯 嘎嘎 呱呱 吱吱 嗡嗡 轰鸣 巨响 爆炸
+轟 嘩 嗚 響 殺 轟隆 嘩啦 喀嚓 啪嗒
 """.split(),
     "en": """
 BOOM POW BANG CRASH WHAM ZAP BAM BLAM KABOOM BOOM

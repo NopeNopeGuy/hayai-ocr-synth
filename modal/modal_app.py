@@ -517,7 +517,7 @@ def run_notebook_pipeline(
     lines_spec = _stage_lines_if_streamable(lines_spec, n_images, seed=seed)
 
     resolved_vertical = vertical
-    if resolved_vertical == "auto" and language in ("en", "ko", "zh"):
+    if resolved_vertical == "auto" and language in ("en", "ko"):
         resolved_vertical = "false"
 
     resolved_min_len = min_line_len if min_line_len > 0 else {"en": 22, "zh": 10, "ko": 10}.get(language, 2)
