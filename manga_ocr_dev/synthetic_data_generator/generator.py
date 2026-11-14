@@ -55,17 +55,15 @@ FURIGANA_PROB_JA = 0.70
 def sample_hard_ink() -> dict:
     """Independent hard rendering conditions for dialogue (empty for easy crops)."""
     o = {}
-    if np.random.rand() < 0.06:
-        o["distress"] = True
-        o["distress_strength"] = float(np.random.uniform(0.25, 0.55))
-    if np.random.rand() < 0.06:
-        o["faint"] = True
-        o["faint_alpha"] = float(np.random.uniform(0.55, 0.80))
     if np.random.rand() < 0.03:
+        o["distress"] = True
+        o["distress_strength"] = float(np.random.uniform(0.20, 0.45))
+    if np.random.rand() < 0.03:
+        o["faint"] = True
+        o["faint_alpha"] = float(np.random.uniform(0.60, 0.85))
+    if np.random.rand() < 0.015:
         o["extrude"] = True
     if np.random.rand() < 0.02:
-        o["hollow"] = True
-    if np.random.rand() < 0.06:
         o["irregular"] = True
     return o
 
@@ -204,7 +202,7 @@ class SyntheticDataGenerator:
             words = self.get_random_words(vocab, override_css_params["font_path"], lang=lang)
         else:
             text = text.replace("\u3000", " ").replace("\u2026", "...")
-            words = self.split_into_words(text, lang=lang)
+            words = self.split_into_words(text, lang=lang, truncate=False)
 
         lines = self.words_to_lines(words, lang=lang)
 
@@ -728,14 +726,8 @@ class SyntheticDataGenerator:
                 break
         return words
 
-    def split_into_words(self, text, lang="ja"):
+    def split_into_words(self, text, lang="ja", truncate=True):
         lang = normalize_lang(lang)
-        # len_to_p.csv is calibrated for Japanese chars; scale up for KO/EN/ZH
-        # so multi-sentence bubbles aren't chopped down to 2-3 words.
-        len_scale = {"ja": 1.0, "zh": 1.4, "ko": 2.2, "en": 3.8}.get(lang, 1.0)
-        len_floor = {"ja": 1, "zh": 12, "ko": 16, "en": 30}.get(lang, 1)
-        max_text_len = max(len_floor, int(round(float(np.random.choice(self._len_vals, p=self._len_probs)) * len_scale)))
-
         if lang in ("ko", "en"):
             words = _WS_SPLIT_RE.findall(text) or [text]
         elif lang == "zh":
@@ -747,6 +739,12 @@ class SyntheticDataGenerator:
         else:
             words = self.parser.parse(text)
 
+        if not truncate:
+            return words
+
+        len_scale = {"ja": 1.0, "zh": 1.4, "ko": 2.2, "en": 3.8}.get(lang, 1.0)
+        len_floor = {"ja": 1, "zh": 12, "ko": 16, "en": 30}.get(lang, 1)
+        max_text_len = max(len_floor, int(round(float(np.random.choice(self._len_vals, p=self._len_probs)) * len_scale)))
         if len(text) <= max_text_len:
             return words
 
@@ -756,7 +754,6 @@ class SyntheticDataGenerator:
             text_len += len(word)
             if text_len >= max_text_len:
                 break
-
         return out
 
     def words_to_lines(self, words, lang="ja"):
@@ -791,7 +788,9 @@ class SyntheticDataGenerator:
                     tokens.append(tok)
                 if i < len(parts) - 1:
                     tokens.append("\n")
-        max_line_len = int(np.clip(np.random.poisson(18), 10, 32))
+        total_chars = sum(len(t) for t in tokens if t != "\n") + max(0, len(tokens) - 1)
+        ideal_w = round((max(1, total_chars) * float(np.random.uniform(2.0, 3.2))) ** 0.5)
+        max_line_len = int(np.clip(ideal_w, 12, 28))
         lines, line = [], ""
         for tok in tokens:
             if tok == "\n":

@@ -198,14 +198,14 @@ SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
 SFX_CROP_MARGIN_MIN = 2
 SFX_INK_ALPHA_THRESHOLD = 8
-TRUNC_PROB = 0.08
+TRUNC_PROB = 0.03
 TRUNC_FRAC_RANGE = (0.10, 0.30)
 TRUNC_INK_BITE_EM = 0.10
 SHADOW_GLOW_GAIN = 2.0
 
-COLOR_PROB = 0.18
+COLOR_PROB = 0.08
 SFX_COLOR_PROB = 0.28
-MULTICOLOR_PROB = 0.35
+MULTICOLOR_PROB = 0.03
 SFX_MULTICOLOR_PROB = 0.4
 MUTED_COLOR_PROB = 0.5
 MULTICOLOR_MODES = ("per_line", "per_char")
@@ -247,7 +247,7 @@ BG_NOISE_PROB = 0.35
 BG_HATCH_PROB = 0.22
 BG_COLOR_ART_PROB = 0.65
 BUBBLE_FILL_MODES = ("white", "gray", "tint", "tone", "dark")
-BUBBLE_FILL_P = (0.65, 0.15, 0.08, 0.05, 0.07)
+BUBBLE_FILL_P = (0.78, 0.10, 0.05, 0.03, 0.04)
 
 HOLLOW_PROB = 0.06
 GRADIENT_FILL_PROB = 0.12
@@ -946,7 +946,7 @@ class Renderer:
         img, ink_box, quality = self.render_background(
             img, draw_bubble=draw_bubble, tight=tight, return_ink_box=True, return_info=True
         )
-        if np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
+        if not draw_bubble and np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
             bite = TRUNC_INK_BITE_EM * float(params.get("font_size", 48))
             img = _truncate_bgr(img, ink_box=ink_box, bite_px=bite)
         if np.random.rand() < FG_OCCLUDE_PROB:
@@ -1126,8 +1126,11 @@ class Renderer:
             base = Image.alpha_composite(base, shadow_layer)
 
         hollow = bool(params.get("hollow", False))
-        if hollow and stroke_size <= 0:
-            stroke_size = 2
+        if hollow:
+            if stroke_size <= 0:
+                stroke_size = 2
+            if stroke_rgba[:3] == (255, 255, 255) and text_rgba[:3] != (255, 255, 255):
+                stroke_rgba = text_rgba
         ink_texture = str(params.get("ink_texture", "solid"))
 
         extrude_layer = None
@@ -2142,26 +2145,26 @@ class Renderer:
 
         if np.random.rand() < IRREGULAR_PROB:
             params["irregular"] = True
-            if np.random.rand() < 0.4:
+            if np.random.rand() < 0.45:
                 params.update(
-                    line_scale_min=0.8,
-                    line_scale_max=1.25,
-                    line_shift=0.8,
+                    line_scale_min=0.90,
+                    line_scale_max=1.12,
+                    line_shift=0.35,
                     char_jitter_prob=0.0,
-                    wobble=0.05,
+                    wobble=0.03,
                     rotate=0.0,
                     small_kana=False,
                 )
             else:
                 params.update(
-                    line_scale_min=0.55,
-                    line_scale_max=1.65,
-                    line_shift=1.6,
-                    char_jitter_prob=0.65,
-                    char_scale_min=0.6,
-                    char_scale_max=1.65,
-                    wobble=0.10,
-                    rotate=float(np.random.uniform(2, 8)),
+                    line_scale_min=0.88,
+                    line_scale_max=1.14,
+                    line_shift=0.35,
+                    char_jitter_prob=0.45,
+                    char_scale_min=0.88,
+                    char_scale_max=1.14,
+                    wobble=0.04,
+                    rotate=float(np.random.uniform(1.0, 3.5)),
                     small_kana=(lang == "ja"),
                 )
 
@@ -2381,7 +2384,7 @@ class Renderer:
             side = min(img.shape[:2])
             m0 = max(SFX_CROP_MARGIN_MIN, int(side * np.random.uniform(*SFX_CROP_MARGIN_FRAC)))
         else:
-            m0 = int(min(img.shape[:2]) * 0.3)
+            m0 = max(28, int(min(img.shape[:2]) * 0.35))
         img = crop_by_alpha(img, m0)
         ink_box = (m0, m0, img.shape[1] - m0, img.shape[0] - m0)
         chromatic_ink = self._ink_is_chromatic_bgra(img)
@@ -2390,15 +2393,17 @@ class Renderer:
         if draw_bubble:
             edge_lum, _ = self._ink_edge(img)
             edge_lum = 0.0 if edge_lum is None else edge_lum
-            # A dark bubble inverts the ink so that dark text becomes light.
-            # Light ink (e.g. a white hollow outline) must *not* be inverted:
-            # doing so turns it into dark ink on a dark fill.
-            invert_for_dark = edge_lum < 128.0 and not chromatic_ink
+            opaque = img[:, :, 3] > 180
+            if opaque.any():
+                obgr = img[:, :, :3][opaque].astype(np.float32)
+                body_lum = float((0.114 * obgr[:, 0] + 0.587 * obgr[:, 1] + 0.299 * obgr[:, 2]).mean())
+            else:
+                body_lum = edge_lum
+            has_light_stroke = edge_lum > 170 and body_lum < 100
+            invert_for_dark = body_lum < 128.0 and not chromatic_ink and not has_light_stroke
             for _ in range(BG_MAX_TRIES):
                 fill_mode, fill_bgr, contour_bgr = self._sample_bubble_fill()
-                if chromatic_ink and fill_mode == "dark":
-                    # Inverting a coloured glyph would change its colour; pick
-                    # a light bubble instead so coloured ink stays coloured.
+                if fill_mode == "dark" and (chromatic_ink or has_light_stroke):
                     continue
                 inverted = fill_mode == "dark" and invert_for_dark
                 ink = 255.0 - edge_lum if inverted else edge_lum
@@ -2408,7 +2413,7 @@ class Renderer:
                     break
             else:
                 fill_mode, fill_bgr, contour_bgr = ("white", (255, 255, 255), (0, 0, 0))
-                if edge_lum > 150:
+                if edge_lum > 150 and body_lum > 150:
                     fill_mode, fill_bgr, contour_bgr = ("dark", (30, 30, 30), (235, 235, 235))
                 inverted = fill_mode == "dark" and invert_for_dark
             if inverted:
@@ -2423,15 +2428,17 @@ class Renderer:
             background = self._make_background(background, img)
 
         if draw_bubble:
-            radius = np.random.uniform(0.7, 1.0)
+            radius = np.random.uniform(0.25, 0.72)
             thickness = np.random.choice([1, 2, 3])
-            alpha = np.random.randint(60, 100)
+            alpha = np.random.randint(15, 42)
             sigma = np.random.randint(10, 15)
 
-            ymin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
-            ymax = img.shape[0] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
-            xmin = m0 - int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
-            xmax = img.shape[1] - m0 + int(min(img.shape[:2]) * np.random.uniform(0.07, 0.12))
+            pad_y = max(14, int(m0 * np.random.uniform(0.45, 0.65)))
+            pad_x = max(18, int(m0 * np.random.uniform(0.55, 0.78)))
+            ymin = max(2, m0 - pad_y)
+            ymax = min(img.shape[0] - 3, img.shape[0] - m0 + pad_y)
+            xmin = max(2, m0 - pad_x)
+            xmax = min(img.shape[1] - 3, img.shape[1] - m0 + pad_x)
 
             bubble_fill_color = (*fill_bgr, 255)
             bubble_contour_color = (*contour_bgr, 255)
