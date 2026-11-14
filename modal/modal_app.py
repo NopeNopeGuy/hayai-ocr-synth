@@ -390,6 +390,7 @@ def run_notebook_pipeline(
     override_json: str = "",
     preview_n: int = 8,
     skip_preview: bool = False,
+    preview_only: bool = False,
     push_to_hub: bool = True,
     update_card: bool = True,
     dry_run_card: bool = False,
@@ -469,7 +470,7 @@ def run_notebook_pipeline(
     out_path = Path(out_dir) if out_dir else (CACHE_MOUNT / "synth_out")
     out_path.mkdir(parents=True, exist_ok=True)
     data_dir = out_path / "data"
-    if override_previous and data_dir.is_dir():
+    if override_previous and not preview_only and data_dir.is_dir():
         if override_scope == "split":
             removed = 0
             for old_shard in data_dir.glob(f"{split}-append-*.parquet"):
@@ -514,7 +515,8 @@ def run_notebook_pipeline(
     else:
         lines_spec = lines_mode
 
-    lines_spec = _stage_lines_if_streamable(lines_spec, n_images, seed=seed)
+    stage_n = max(16, preview_n) if preview_only else n_images
+    lines_spec = _stage_lines_if_streamable(lines_spec, stage_n, seed=seed)
 
     resolved_vertical = vertical
     if resolved_vertical == "auto" and language in ("en", "ko"):
@@ -587,12 +589,26 @@ def run_notebook_pipeline(
         json.dumps(run_info, indent=2), encoding="utf-8"
     )
 
-    if not skip_preview:
+    preview_bytes = None
+    preview_filename = None
+    if preview_only or not skip_preview:
         preview_png = out_path / f"preview-{run_id}.png"
         _run_script(
             script,
             ["preview", *common, "--preview", str(max(1, preview_n)), "--preview-out", str(preview_png)],
         )
+        if preview_png.is_file():
+            preview_bytes = preview_png.read_bytes()
+            preview_filename = preview_png.name
+    if preview_only:
+        return {
+            "run_id": run_id,
+            "split": split,
+            "language": language,
+            "preview_only": True,
+            "preview_filename": preview_filename,
+            "preview_bytes": preview_bytes,
+        }
 
     gen_cmd = [
         "generate",
@@ -712,7 +728,10 @@ def main(
     preset_mix: str = "auto",
     push_to_hub: bool = True,
     update_card: bool = True,
+    preview_n: int = 8,
     skip_preview: bool = False,
+    preview_only: bool = False,
+    local_preview_out: str = "",
     perf_patches: bool = True,
 ):
     result = run_notebook_pipeline.remote(
@@ -736,7 +755,18 @@ def main(
         preset_mix=preset_mix,
         push_to_hub=push_to_hub,
         update_card=update_card,
+        preview_n=preview_n,
         skip_preview=skip_preview,
+        preview_only=preview_only,
         perf_patches=perf_patches,
     )
+    preview_bytes = result.pop("preview_bytes", None)
+    preview_name = result.pop("preview_filename", None)
+    if preview_bytes:
+        target = Path(local_preview_out).expanduser() if local_preview_out else Path("previews")
+        local_path = target if target.suffix.lower() == ".png" else (target / (preview_name or f"preview-{result['run_id']}.png"))
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(preview_bytes)
+        result["local_preview"] = str(local_path.resolve())
+        print(f"Saved local preview -> {local_path.resolve()}")
     print("Pipeline finished:", json.dumps(result, indent=2))

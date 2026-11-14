@@ -239,7 +239,7 @@ BG_MIN_STD = (30.0, 75.0)
 BG_INK_OFFSET = (35.0, 95.0)
 BG_MIN_EDGE_DIFF = 75.0
 BG_MAX_LOW_CONTRAST = 0.20
-BG_MAX_TRIES = 6
+BG_MAX_TRIES = 3
 BG_CAMO_PROB = 0.15
 BG_SCREENTONE_PROB = 0.32
 BG_GRADIENT_PROB = 0.32
@@ -280,11 +280,11 @@ MIN_OUTPUT_SIDE = 32  # px, tiny slivers are not useful OCR samples
 MAX_OUTPUT_ASPECT = 12.0  # hard cap for very long strips
 STRIP_ASPECT = 6.0  # strips beyond this must still contain large, visible text
 MIN_EFFECTIVE_FONT = 20.0  # px after the final 600px downscale
-MIN_VISIBLE_TEXT_FRAC = 0.70  # share of ink pixels that must contrast with the background
-MIN_TEXT_CONTRAST = 45.0  # luminance difference (0-255) counted as visible
+MIN_VISIBLE_TEXT_FRAC = 0.55  # share of ink pixels that must contrast with the background
+MIN_TEXT_CONTRAST = 32.0  # luminance difference (0-255) counted as visible
 MIN_TEXT_ALPHA_FOR_QUALITY = 0.20
-RENDER_ATTEMPTS = 3  # retries for random background/bubble sampling
-SAMPLE_ATTEMPTS = 4  # retries that resample the text layout in the generator
+RENDER_ATTEMPTS = 2  # retries for random background/bubble sampling
+SAMPLE_ATTEMPTS = 3  # retries that resample the text layout in the generator
 
 RUBY_RE = re.compile(r"<ruby>(.*?)<rt>(.*?)</rt></ruby>")
 TCY_RE = re.compile(r"<span[^>]*?text-combine-upright[^>]*?>(.*?)</span>")
@@ -2423,6 +2423,8 @@ class Renderer:
                 fill_mode, fill_bgr, contour_bgr = self._sample_bubble_fill()
                 if fill_mode == "dark" and (chromatic_ink or has_light_stroke):
                     continue
+                if chromatic_ink and body_lum > 140 and fill_mode != "white":
+                    continue
                 inverted = fill_mode == "dark" and invert_for_dark
                 ink = 255.0 - edge_lum if inverted else edge_lum
                 fl = float(np.mean(fill_bgr))
@@ -2479,7 +2481,7 @@ class Renderer:
             )
 
             bh, bw = bubble.shape[:2]
-            if max(bh, bw) > 128:
+            if max(bh, bw) > 96:
                 small_bubble = cv2.resize(bubble, (bw // 2, bh // 2), interpolation=cv2.INTER_NEAREST)
                 small_t = [A.ElasticTransform(alpha=alpha / 2.0, sigma=sigma / 2.0, p=0.8)]
                 warped = A.Compose(small_t)(image=small_bubble)["image"]
