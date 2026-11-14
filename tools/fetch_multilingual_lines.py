@@ -55,6 +55,8 @@ _RE_ZH_SENT = re.compile(r"(?<=[。！？!?])")
 _RE_KO_SENT = re.compile(r"(?<=[.!?。！？])\s+")
 
 _RE_HAS_HAN = re.compile(r"[\u4e00-\u9fff]")
+_RE_PINYIN_TONE = re.compile(r"[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]")
+_RE_ZH_SPACE = re.compile(r"(?<=[\u4e00-\u9fff，。！？；：、（）「」『』《》])\s+|\s+(?=[\u4e00-\u9fff，。！？；：、（）「」『』《》])")
 _RE_HAS_HANGUL = re.compile(r"[\uac00-\ud7af]")
 _RE_HAS_LATIN = re.compile(r"[A-Za-z]")
 
@@ -79,8 +81,12 @@ def _valid_for_lang(text: str, lang: str) -> bool:
         alpha = sum(c.isalpha() and ord(c) < 128 for c in text)
         return _RE_HAS_LATIN.search(text) is not None and alpha >= max(8, len(text) * 0.55)
     if lang == "zh":
+        if _RE_PINYIN_TONE.search(text) or "读作" in text or "讀作" in text:
+            return False
+        if text[-1] in ",，、:：":
+            return False
         han = len(_RE_HAS_HAN.findall(text))
-        return han >= max(4, int(len(text) * 0.45))
+        return han >= max(4, int(len(text) * 0.50))
     if lang == "ko":
         ko = len(_RE_HAS_HANGUL.findall(text))
         return ko >= max(4, int(len(text) * 0.40))
@@ -188,6 +194,8 @@ def _iter_opensubtitles_lines(lang: str, seed: int = 42) -> Iterator[str]:
     ds = _load_opensubtitles_stream(configs, seed=seed)
     for row in ds:
         line = _clean_sub_line(str(row.get(col) or ""))
+        if lang == "zh":
+            line = _RE_ZH_SPACE.sub("", line)
         if not line or len(line) < 4:
             continue
         if _valid_for_lang(line, lang):
@@ -215,7 +223,7 @@ def stream_wikipedia_lines(
     seed: int = 42,
 ) -> Iterator[str]:
     cfg_map = {"en": "20231101.en", "zh": "20231101.zh", "ko": "20231101.ko"}
-    defaults = {"en": (28, 125), "zh": (12, 55), "ko": (12, 65)}
+    defaults = {"en": (28, 125), "zh": (10, 42), "ko": (12, 65)}
     lo, hi = defaults[lang]
     min_chars = lo if min_chars is None else min_chars
     max_chars = hi if max_chars is None else max_chars
@@ -230,7 +238,7 @@ def stream_opensubtitles_lines(
     max_chars: int | None = None,
     seed: int = 42,
 ) -> Iterator[str]:
-    defaults = {"en": (22, 115), "zh": (10, 52), "ko": (10, 60)}
+    defaults = {"en": (22, 115), "zh": (6, 40), "ko": (10, 60)}
     lo, hi = defaults[lang]
     min_chars = lo if min_chars is None else min_chars
     max_chars = hi if max_chars is None else max_chars

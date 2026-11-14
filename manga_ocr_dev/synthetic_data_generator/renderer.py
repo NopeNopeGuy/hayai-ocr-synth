@@ -279,7 +279,7 @@ SCAN_NOISE_SIGMA = (2.0, 7.0)
 MIN_OUTPUT_SIDE = 32  # px, tiny slivers are not useful OCR samples
 MAX_OUTPUT_ASPECT = 12.0  # hard cap for very long strips
 STRIP_ASPECT = 6.0  # strips beyond this must still contain large, visible text
-MIN_EFFECTIVE_FONT = 16.0  # px after the final 600px downscale
+MIN_EFFECTIVE_FONT = 20.0  # px after the final 600px downscale
 MIN_VISIBLE_TEXT_FRAC = 0.70  # share of ink pixels that must contrast with the background
 MIN_TEXT_CONTRAST = 45.0  # luminance difference (0-255) counted as visible
 MIN_TEXT_ALPHA_FOR_QUALITY = 0.20
@@ -844,14 +844,14 @@ def _ink_realism(layer):
     return Image.fromarray(arr)
 
 
-def _scan_model_bgr(img):
+def _scan_model_bgr(img, allow_spread=True):
     h, w = img.shape[:2]
     out = img.astype(np.float32)
     if np.random.rand() < SCAN_ILLUM_PROB:
         depth = float(np.random.uniform(*SCAN_ILLUM_DEPTH))
         field = (_smooth_field(h, w, grid=3) + 1.0) * 0.5
         out *= (1.0 - depth * field)[..., None]
-    if np.random.rand() < SCAN_SPREAD_PROB:
+    if allow_spread and np.random.rand() < SCAN_SPREAD_PROB:
         out = cv2.erode(out, np.ones((3, 3), np.uint8))
     if np.random.rand() < SCAN_DEFOCUS_PROB:
         out = cv2.GaussianBlur(out, (0, 0), float(np.random.uniform(*SCAN_DEFOCUS_SIGMA)))
@@ -861,17 +861,17 @@ def _scan_model_bgr(img):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _degrade_bgr(img, is_color):
+def _degrade_bgr(img, is_color, allow_blur=True, allow_scale=True):
     out = img
-    if np.random.rand() < DEGRADE_SCALE_PROB and min(out.shape[:2]) >= 48:
+    if allow_scale and np.random.rand() < DEGRADE_SCALE_PROB and min(out.shape[:2]) >= 64:
         h, w = out.shape[:2]
-        s = float(np.random.uniform(0.65, 0.90) if min(h, w) < 120 else np.random.uniform(0.50, 0.85))
+        s = float(np.random.uniform(0.72, 0.92) if min(h, w) < 140 else np.random.uniform(0.60, 0.88))
         nh, nw = int(h * s), int(w * s)
-        if min(nh, nw) >= 36:
+        if min(nh, nw) >= 48:
             small = cv2.resize(out, (nw, nh), interpolation=cv2.INTER_AREA)
             out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
     r = np.random.rand()
-    if r < DEGRADE_BLUR_PROB * 0.6:
+    if allow_blur and r < DEGRADE_BLUR_PROB * 0.6:
         out = cv2.GaussianBlur(out, (3, 3), 0)
     elif r < DEGRADE_BLUR_PROB:
         k = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
@@ -947,8 +947,8 @@ class Renderer:
         pre_params["draw_bubble"] = draw_bubble
         if not draw_bubble:
             pre_params["faint"] = False
-            if int(pre_params.get("stroke_size") or 0) < 2:
-                pre_params["stroke_size"] = 2 if not pre_params.get("sfx") else 3
+            if int(pre_params.get("stroke_size") or 0) < 3:
+                pre_params["stroke_size"] = 3
                 if not pre_params.get("stroke_color"):
                     tc = str(pre_params.get("text_color", "black")).strip().lower()
                     pre_params["stroke_color"] = "black" if tc == "white" else "white"
@@ -986,8 +986,13 @@ class Renderer:
         if issues:
             raise DegenerateSampleError("degenerate synthetic crop: " + ", ".join(issues))
         is_color = _params_are_color(params)
-        img = _scan_model_bgr(img)
-        img = _degrade_bgr(img, is_color)
+        img = _scan_model_bgr(img, allow_spread=draw_bubble)
+        img = _degrade_bgr(
+            img,
+            is_color,
+            allow_blur=(effective_font >= 28.0),
+            allow_scale=(effective_font >= 32.0),
+        )
         if is_color:
             return img, params
         if img.ndim == 3:

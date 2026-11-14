@@ -290,13 +290,13 @@ def _stage_lines_if_streamable(lines_spec: str, n_images: int, seed: int = 42) -
     """Cache Wikipedia / OpenSubtitles streams to /cache/lines and /tmp."""
     streamers = {
         "hf:ko": ("ko_opensub_wiki_v2", "stream_korean_lines", "ko_opensubtitles_wiki", {}),
-        "hf:zh": ("zh_opensub_wiki_v2", "stream_chinese_lines", "zh_opensubtitles_wiki", {}),
+        "hf:zh": ("zh_opensub_wiki_v3", "stream_chinese_lines", "zh_opensubtitles_wiki", {}),
         "hf:en": ("en_opensub_wiki_v2", "stream_english_lines", "en_opensubtitles_wiki", {}),
         "hf:wikipedia:ko": ("ko_wiki_v2", "stream_wikipedia_lines", "wikipedia_ko", {"lang": "ko"}),
-        "hf:wikipedia:zh": ("zh_wiki_v2", "stream_wikipedia_lines", "wikipedia_zh", {"lang": "zh"}),
+        "hf:wikipedia:zh": ("zh_wiki_v3", "stream_wikipedia_lines", "wikipedia_zh", {"lang": "zh"}),
         "hf:wikipedia:en": ("en_wiki_v2", "stream_wikipedia_lines", "wikipedia_en", {"lang": "en"}),
         "hf:opensubtitles:ko": ("ko_opensub_v2", "stream_opensubtitles_lines", "opensubtitles_ko", {"lang": "ko"}),
-        "hf:opensubtitles:zh": ("zh_opensub_v2", "stream_opensubtitles_lines", "opensubtitles_zh", {"lang": "zh"}),
+        "hf:opensubtitles:zh": ("zh_opensub_v3", "stream_opensubtitles_lines", "opensubtitles_zh", {"lang": "zh"}),
         "hf:opensubtitles:en": ("en_opensub_v2", "stream_opensubtitles_lines", "opensubtitles_en", {"lang": "en"}),
     }
     if lines_spec not in streamers:
@@ -520,7 +520,7 @@ def run_notebook_pipeline(
     if resolved_vertical == "auto" and language in ("en", "ko"):
         resolved_vertical = "false"
 
-    resolved_min_len = min_line_len if min_line_len > 0 else {"en": 22, "zh": 10, "ko": 10}.get(language, 2)
+    resolved_min_len = min_line_len if min_line_len > 0 else {"en": 22, "zh": 6, "ko": 10}.get(language, 2)
 
     common = [
         "--split", split,

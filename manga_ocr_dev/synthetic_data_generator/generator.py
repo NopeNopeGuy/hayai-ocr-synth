@@ -797,30 +797,47 @@ class SyntheticDataGenerator:
         return out
 
     def words_to_lines(self, words, lang="ja"):
+        import math
+
         lang = normalize_lang(lang)
         if lang in ("ko", "en"):
             return self._words_to_lines_spaced(words, lang=lang)
         text = "".join(words)
 
-        max_num_lines = 10
-        min_line_len = len(text) // max_num_lines
-        max_line_cap = 22 if lang == "zh" else 20
-        target_poisson = 10 if lang == "zh" else 7
-        floor_len = 4 if lang == "zh" else 1
-        max_line_len = np.clip(
-            np.random.poisson(target_poisson),
-            max(floor_len, min_line_len),
-            max_line_cap,
-        )
+        if lang == "zh":
+            if np.random.rand() < 0.22:
+                # Narrow speech-bubble wrap: down to 2 chars/line for shorter bubbles,
+                # capped at <= ~9 lines so LongestMaxSize(600) doesn't shrink glyphs.
+                narrow = int(np.random.choice([2, 3, 4], p=[0.40, 0.35, 0.25]))
+                min_for_height = max(2, math.ceil(len(text) / 9))
+                max_line_len = max(narrow, min_for_height)
+            else:
+                ideal_w = round((max(1, len(text)) * float(np.random.uniform(1.4, 2.3))) ** 0.5)
+                max_line_len = int(np.clip(ideal_w, 6, 12))
+                if len(text) > max_line_len:
+                    n_lines = max(2, math.ceil(len(text) / max_line_len))
+                    max_line_len = max(5, min(13, math.ceil(len(text) / n_lines) + 1))
+        else:
+            max_num_lines = 10
+            min_line_len = len(text) // max_num_lines
+            max_line_len = int(np.clip(np.random.poisson(7), max(1, min_line_len), 20))
+
+        no_line_start = set("，。！？；：、」』）］》…,.!?;:)]}")
         lines = []
         line = ""
         for word in words:
+            if not line and lines and word and word[0] in no_line_start:
+                lines[-1] += word
+                continue
             line += word
             if len(line) >= max_line_len:
                 lines.append(line)
                 line = ""
         if line:
-            lines.append(line)
+            if lines and len(line) == 1 and line in no_line_start:
+                lines[-1] += line
+            else:
+                lines.append(line)
 
         return lines
 
