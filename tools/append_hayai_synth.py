@@ -728,8 +728,6 @@ def _cfg_from_args(args: argparse.Namespace) -> dict:
         "hf_splits": args.hf_splits,
         "hf_configs": args.hf_configs,
         "min_line_len": int(args.min_line_len),
-        "min_line_len": int(args.min_line_len),
-        "min_line_len": int(args.min_line_len),
         "max_line_len": int(args.max_line_len),
         "dedup_window": int(args.dedup_window),
         "language": args.language,
@@ -1300,8 +1298,6 @@ def _add_generate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hf-dataset", default=None, help="override the HF dataset id for hf:dialogue / hf:novel")
     parser.add_argument("--hf-splits", default=None, help="comma-separated dialogue splits (hf:dialogue)")
     parser.add_argument("--hf-configs", default=None, help="comma-separated novel configs (hf:novel)")
-    parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
-    parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
     parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
     parser.add_argument("--max-line-len", type=int, default=200, help="skip longer source lines")
     parser.add_argument("--dedup-window", type=int, default=50000, help="rolling duplicate window (0 disables)")

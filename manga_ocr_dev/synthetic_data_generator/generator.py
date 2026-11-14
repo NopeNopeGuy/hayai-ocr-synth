@@ -259,6 +259,7 @@ class SyntheticDataGenerator:
 
     def _sfx_weights(self, paths):
         weights = []
+        is_hand = []
         for p in paths:
             prof = get_font_profile(p)
             if prof.get("priority") == "omit" or not prof.get("is_manga", True):
@@ -266,9 +267,20 @@ class SyntheticDataGenerator:
             else:
                 w = float(prof.get("sfx_weight", 1.0))
             weights.append(w)
+            is_hand.append(prof.get("font_type") == "handwritten" and w > 0.0)
         w = np.array(weights, dtype=float)
         if w.sum() == 0:
             return np.ones(len(paths)) / len(paths)
+        hand_mask = np.array(is_hand, dtype=bool)
+        if hand_mask.any() and (~hand_mask).any():
+            # Target ~45% handwritten/brush fonts for SFX (capped when only a few exist)
+            target_hand = min(0.45, 0.12 * int(hand_mask.sum()))
+            w_hand = w[hand_mask] / w[hand_mask].sum() * target_hand
+            w_other = w[~hand_mask] / w[~hand_mask].sum() * (1.0 - target_hand)
+            out = np.zeros_like(w)
+            out[hand_mask] = w_hand
+            out[~hand_mask] = w_other
+            return out
         return w / w.sum()
 
     def _vocab_probe(self, lang):
@@ -319,7 +331,8 @@ class SyntheticDataGenerator:
         )
 
     def _get_sfx_fonts_en(self):
-        return self._fonts_covering(set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"), thresh=0.98)
+        # Uppercase-only comic/SFX/handwritten fonts often omit lowercase glyphs
+        return self._fonts_covering(set("ABCDEFGHIJKLMNOPQRSTUVWXYZ!?"), thresh=0.95)
 
     def _get_sfx_fonts_cjk(self, lang):
         bases = SFX_BASES[lang]
@@ -329,15 +342,19 @@ class SyntheticDataGenerator:
         pre_cover = self.font_map.coverage(probe) if probe else np.zeros(len(self.font_map.paths))
         order = np.argsort(-pre_cover)
         paths = self.font_map.paths
-        good = []
+        hand_good = []
+        other_good = []
         for idx in order:
-            if len(good) >= 80:
+            if len(hand_good) >= 60 and len(other_good) >= 80:
                 break
-            if pre_cover[idx] < 0.30:
+            if pre_cover[idx] < 0.15:
                 break
             if not self._is_manga_mask[int(idx)]:
                 continue
             p = paths[int(idx)]
+            is_hand = get_font_profile(p).get("font_type") == "handwritten"
+            if not is_hand and (len(other_good) >= 80 or pre_cover[idx] < 0.30):
+                continue
             try:
                 cmap = get_font_cmap_chars(p)
             except Exception:  # noqa: BLE001
@@ -345,8 +362,9 @@ class SyntheticDataGenerator:
             if not all(ord(c) in cmap for c in core):
                 continue
             hit = sum(ord(c) in cmap for c in need) / max(1, len(need))
-            if hit >= 0.85:
-                good.append(p)
+            if hit >= (0.65 if is_hand else 0.85):
+                (hand_good if is_hand else other_good).append(p)
+        good = hand_good + other_good
         if not good:
             scored = []
             for idx in order[:200]:
@@ -415,7 +433,9 @@ class SyntheticDataGenerator:
                     c for c in cand if (c in vocab or c.isspace() or is_drawable(font_path, c)) and c not in "<>&"
                 )
                 sfx_text = cand.strip() or self.get_random_sfx_text(vocab, font_path, lang=lang)
-            if sfx_text and not all((c in vocab or is_drawable(font_path, c)) for c in sfx_text):
+            if sfx_text and lang == "en" and not all((c in vocab or c.isspace() or is_drawable(font_path, c)) for c in sfx_text):
+                sfx_text = sfx_text.upper()
+            if sfx_text and not all((c in vocab or c.isspace() or is_drawable(font_path, c)) for c in sfx_text):
                 sfx_text = None
             if sfx_text:
                 break
@@ -423,8 +443,9 @@ class SyntheticDataGenerator:
             raise ValueError("no SFX text could be rendered with the available fonts")
 
         lines = [sfx_text]
-        if " " in sfx_text and lang == "en":
-            lines = [sfx_text]
+        if lang == "en":
+            if " " in sfx_text and np.random.rand() < 0.45:
+                lines = sfx_text.split()
         elif len(sfx_text) > 6 and np.random.rand() < 0.45:
             cut = len(sfx_text) // 2
             lines = [sfx_text[:cut], sfx_text[cut:]]

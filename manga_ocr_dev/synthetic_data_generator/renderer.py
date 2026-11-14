@@ -179,21 +179,21 @@ DIALOGUE_FONT_SIZE_RANGE = (26, 56)
 DIALOGUE_LINE_HEIGHT_RANGE = (0.22, 0.62)
 
 SFX_FONT_SIZE_RANGE = (38, 190)
-SFX_CHAR_SCALE_RANGE = (0.75, 2.1)
-SFX_LINE_SCALE_RANGE = (0.8, 1.3)
-SFX_PERSP_RANGE = (0.10, 0.45)
-SFX_ROTATE_DEG = 35.0
-SFX_BLOCK_ROTATE_RANGE = (-35.0, 35.0)
+SFX_CHAR_SCALE_RANGE = (0.85, 1.35)
+SFX_LINE_SCALE_RANGE = (0.88, 1.15)
+SFX_PERSP_RANGE = (0.04, 0.18)
+SFX_ROTATE_DEG = 14.0
+SFX_BLOCK_ROTATE_RANGE = (-28.0, 28.0)
 SFX_BLOCK_ROTATE_90_PROB = 0.05
-SFX_CURVE_MODES = ("arc", "wave", "diagonal", "straight", "zigzag", "bounce", "hill", "steep", "circle")
-SFX_CURVE_P = (0.18, 0.15, 0.13, 0.12, 0.09, 0.09, 0.09, 0.08, 0.07)
+SFX_CURVE_MODES = ("straight", "arc", "diagonal", "wave", "hill", "bounce", "steep", "zigzag", "circle")
+SFX_CURVE_P = (0.34, 0.24, 0.16, 0.10, 0.05, 0.04, 0.03, 0.02, 0.02)
 SFX_ADJACENT_SCALE_MAX = 1.8
-SFX_ASPECT_MAX = 0.7
-SFX_SPACING_RANGE = (-0.18, 0.22)
-SFX_CURVE_AMP_RANGE = (0.15, 0.6)
-SFX_SPEEDLINE_PROB = 0.6
+SFX_ASPECT_MAX = 0.25
+SFX_SPACING_RANGE = (-0.08, 0.14)
+SFX_CURVE_AMP_RANGE = (0.08, 0.30)
+SFX_SPEEDLINE_PROB = 0.22
 SFX_SPEEDLINE_N_RANGE = (24, 80)
-SFX_BURST_PROB = 0.35
+SFX_BURST_PROB = 0.18
 SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
 SFX_CROP_MARGIN_MIN = 2
@@ -2061,15 +2061,15 @@ class Renderer:
             "stroke_size": stroke_size,
             "stroke_color": "white",
             "sfx_curve": str(np.random.choice(SFX_CURVE_MODES, p=SFX_CURVE_P)),
-            "sfx_aspect": float(np.random.uniform(0.0, SFX_ASPECT_MAX)) if np.random.rand() < 0.65 else 0.0,
+            "sfx_aspect": float(np.random.uniform(0.0, SFX_ASPECT_MAX)) if np.random.rand() < 0.30 else 0.0,
             "sfx_speedline_style": str(np.random.choice(["radial", "parallel"], p=[0.6, 0.4])),
             "letter_spacing": float(np.random.uniform(*SFX_SPACING_RANGE)),
             "sfx_curve_amp": float(np.random.uniform(*SFX_CURVE_AMP_RANGE)),
             "sfx_curve_sign": float(np.random.choice([-1.0, 1.0])),
-            "sfx_persp": float(np.random.uniform(*SFX_PERSP_RANGE)),
-            "sfx_rotate": float(np.random.uniform(6.0, SFX_ROTATE_DEG)),
+            "sfx_persp": float(np.random.uniform(*SFX_PERSP_RANGE)) if np.random.rand() < 0.35 else 0.0,
+            "sfx_rotate": float(np.random.uniform(2.0, SFX_ROTATE_DEG)),
             "sfx_char_scale_min": float(SFX_CHAR_SCALE_RANGE[0]),
-            "sfx_char_scale_max": float(np.random.uniform(1.5, SFX_CHAR_SCALE_RANGE[1])),
+            "sfx_char_scale_max": float(np.random.uniform(1.05, SFX_CHAR_SCALE_RANGE[1])),
             "sfx_wobble": float(np.random.uniform(0.03, 0.12)),
             "sfx_speedlines": bool(np.random.rand() < SFX_SPEEDLINE_PROB),
             "sfx_speedline_n": int(np.random.randint(*SFX_SPEEDLINE_N_RANGE)),
@@ -2102,7 +2102,7 @@ class Renderer:
         if np.random.rand() < 0.15:
             params["slant"] = float(np.random.uniform(*SLANT_MILD_RANGE) * np.random.choice([-1.0, 1.0]))
         _maybe_multicolor(params, text_color, sfx=True)
-        if np.random.rand() < BG_CAMO_PROB:
+        if np.random.rand() < BG_CAMO_PROB * 0.15:
             return params
         return _ensure_legible_outline(params)
 
