@@ -612,7 +612,7 @@ def iter_dialogue_stream(
     if isinstance(splits, str):
         splits = [s.strip() for s in splits.split(",") if s.strip()]
     if not splits:
-        raise ValueError("No dialogue splits configured")
+        splits = DEFAULT_DIALOGUE_SPLITS
 
     iterators = []
     for split in splits:
@@ -656,6 +656,8 @@ def iter_novel_stream(
     """
     if isinstance(configs, str):
         configs = [c.strip() for c in configs.split(",") if c.strip()]
+    if not configs:
+        configs = DEFAULT_NOVEL_CONFIGS
 
     if data_files:
         resolved = _resolve_data_file_args(data_files)

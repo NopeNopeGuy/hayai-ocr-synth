@@ -301,24 +301,24 @@ def _iter_text_items(cfg: dict) -> Iterator[dict]:
     if lines.startswith("hf:"):
         spec = lines[3:]
         if spec.startswith("dialogue"):
-            from manga_ocr_dev.data.process_text import iter_dialogue_stream
+            from manga_ocr_dev.data.process_text import DEFAULT_DIALOGUE_SPLITS, iter_dialogue_stream
 
             splits = spec.split(":", 1)[1] if ":" in spec else cfg.get("hf_splits") or ""
             yield from iter_dialogue_stream(
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_DIALOGUE_DATASET,
-                splits=splits,
+                splits=splits or DEFAULT_DIALOGUE_SPLITS,
                 streaming=True,
                 min_len=min_len,
                 max_len=max_len,
             )
             return
         if spec.startswith("novel"):
-            from manga_ocr_dev.data.process_text import iter_novel_stream
+            from manga_ocr_dev.data.process_text import DEFAULT_NOVEL_CONFIGS, iter_novel_stream
 
             configs = spec.split(":", 1)[1] if ":" in spec else cfg.get("hf_configs") or ""
             yield from iter_novel_stream(
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_NOVEL_DATASET,
-                configs=configs,
+                configs=configs or DEFAULT_NOVEL_CONFIGS,
                 streaming=True,
                 min_len=min_len,
                 max_len=max_len,

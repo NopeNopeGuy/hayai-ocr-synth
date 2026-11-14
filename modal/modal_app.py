@@ -42,7 +42,7 @@ LANG_FONT_FOLDERS = {
     "zh": ["Chinese_Additions", "精简包/简体", "精简包/繁体", "精简包/简繁"],
     "ko": ["Korean"],
     "en": ["Latin_Comic"],
-    "ja": ["精简包/日文", "Chinese_Additions"],
+    "ja": ["More_JP", "精简包/日文", "Chinese_Additions"],
 }
 
 
@@ -386,7 +386,7 @@ def run_notebook_pipeline(
     stroke_size: int = -1,
     slant_deg: float = -999.0,
     hard_ink: str = "auto",
-    preset_mix: str = "dialogue_bubble=0.65,dialogue_flat=0.15,handwritten=0.12,sfx=0.08",
+    preset_mix: str = "auto",
     override_json: str = "",
     preview_n: int = 8,
     skip_preview: bool = False,
@@ -556,8 +556,14 @@ def run_notebook_pipeline(
         common += ["--stroke-size", str(stroke_size)]
     if slant_deg > -900:
         common += ["--slant-deg", str(slant_deg)]
-    if preset_mix and crop_preset == "mixed":
-        common += ["--preset-mix", preset_mix]
+    resolved_preset_mix = preset_mix
+    if not resolved_preset_mix or resolved_preset_mix == "auto":
+        if language == "ja":
+            resolved_preset_mix = "dialogue_bubble=0.58,dialogue_flat=0.14,handwritten=0.13,sfx=0.15"
+        else:
+            resolved_preset_mix = "dialogue_bubble=0.65,dialogue_flat=0.15,handwritten=0.12,sfx=0.08"
+    if resolved_preset_mix and crop_preset == "mixed":
+        common += ["--preset-mix", resolved_preset_mix]
     if override_json:
         common += ["--override-json", override_json]
     if text_column:
@@ -703,7 +709,7 @@ def main(
     override_scope: str = "split",
     min_line_len: int = 0,
     vertical: str = "auto",
-    preset_mix: str = "dialogue_bubble=0.65,dialogue_flat=0.15,handwritten=0.12,sfx=0.08",
+    preset_mix: str = "auto",
     push_to_hub: bool = True,
     update_card: bool = True,
     skip_preview: bool = False,
