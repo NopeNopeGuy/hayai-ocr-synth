@@ -354,8 +354,8 @@ def split_novel_chapter(
                     lines.extend(_split_long_quote(chunk, min_len, sentence_split))
                 else:
                     lines.extend(_pack_quote_segments(chunk, max_len, min_len, sentence_split))
-        elif lang == "en" and ('"' in para or '"' in para or "'" in para):
-            tokens = re.findall(r'"[^"]*"|\'[^\']*\'|[^"\']+', para)
+        elif lang == "en" and ('"' in para or "“" in para or "”" in para):
+            tokens = re.findall(r'"[^"]*"|“[^”]*”|[^"“”]+', para)
             for tok in tokens:
                 tok = tok.strip()
                 if len(tok) >= min_len:

@@ -55,17 +55,17 @@ FURIGANA_PROB_JA = 0.70
 def sample_hard_ink() -> dict:
     """Independent hard rendering conditions for dialogue (empty for easy crops)."""
     o = {}
-    if np.random.rand() < 0.30:
+    if np.random.rand() < 0.06:
         o["distress"] = True
-        o["distress_strength"] = float(np.random.uniform(0.3, 0.7))
-    if np.random.rand() < 0.20:
+        o["distress_strength"] = float(np.random.uniform(0.25, 0.55))
+    if np.random.rand() < 0.06:
         o["faint"] = True
-        o["faint_alpha"] = float(np.random.uniform(0.4, 0.7))
-    if np.random.rand() < 0.12:
+        o["faint_alpha"] = float(np.random.uniform(0.55, 0.80))
+    if np.random.rand() < 0.03:
         o["extrude"] = True
-    if np.random.rand() < 0.10:
+    if np.random.rand() < 0.02:
         o["hollow"] = True
-    if np.random.rand() < 0.12:
+    if np.random.rand() < 0.06:
         o["irregular"] = True
     return o
 
@@ -709,7 +709,11 @@ class SyntheticDataGenerator:
 
     def split_into_words(self, text, lang="ja"):
         lang = normalize_lang(lang)
-        max_text_len = np.random.choice(self._len_vals, p=self._len_probs)
+        # len_to_p.csv is calibrated for Japanese chars; scale up for KO/EN/ZH
+        # so multi-sentence bubbles aren't chopped down to 2-3 words.
+        len_scale = {"ja": 1.0, "zh": 1.4, "ko": 2.2, "en": 3.8}.get(lang, 1.0)
+        len_floor = {"ja": 1, "zh": 12, "ko": 16, "en": 30}.get(lang, 1)
+        max_text_len = max(len_floor, int(round(float(np.random.choice(self._len_vals, p=self._len_probs)) * len_scale)))
 
         if lang in ("ko", "en"):
             words = _WS_SPLIT_RE.findall(text) or [text]
@@ -722,11 +726,14 @@ class SyntheticDataGenerator:
         else:
             words = self.parser.parse(text)
 
+        if len(text) <= max_text_len:
+            return words
+
         out, text_len = [], 0
         for word in words:
             out.append(word)
             text_len += len(word)
-            if text_len + len(word) >= max_text_len:
+            if text_len >= max_text_len:
                 break
 
         return out
@@ -763,7 +770,7 @@ class SyntheticDataGenerator:
                     tokens.append(tok)
                 if i < len(parts) - 1:
                     tokens.append("\n")
-        max_line_len = int(np.clip(np.random.poisson(14), 8, 28))
+        max_line_len = int(np.clip(np.random.poisson(18), 10, 32))
         lines, line = [], ""
         for tok in tokens:
             if tok == "\n":

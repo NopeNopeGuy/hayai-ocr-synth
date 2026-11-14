@@ -159,7 +159,7 @@ def _get_real_kana_bank(root=None, cfg=None):
         return bank
 
 
-IRREGULAR_PROB = 0.55
+IRREGULAR_PROB = 0.12
 LINE_SCALE_RANGE = (0.6, 1.55)
 LINE_SHIFT_EM = 1.5
 CHAR_SCALE_RANGE = (0.65, 1.6)
@@ -170,10 +170,10 @@ SMALL_KANA = frozenset("ぁぃぅぇぉっゃゅょゎァィゥェォッャュ�
 SMALL_KANA_SCALE = (0.55, 0.8)
 MIN_CHAR_SIZE = 8
 
-SLANT_PROB = 0.22
+SLANT_PROB = 0.08
 SLANT_MILD_RANGE = (8.0, 15.0)
 SLANT_STRONG_RANGE = (20.0, 38.0)
-SLANT_STRONG_PROB = 0.4
+SLANT_STRONG_PROB = 0.20
 
 DIALOGUE_FONT_SIZE_RANGE = (26, 56)
 DIALOGUE_LINE_HEIGHT_RANGE = (0.22, 0.62)
@@ -198,7 +198,7 @@ SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
 SFX_CROP_MARGIN_MIN = 2
 SFX_INK_ALPHA_THRESHOLD = 8
-TRUNC_PROB = 0.2
+TRUNC_PROB = 0.08
 TRUNC_FRAC_RANGE = (0.10, 0.30)
 TRUNC_INK_BITE_EM = 0.10
 SHADOW_GLOW_GAIN = 2.0
@@ -225,7 +225,7 @@ TEXT_COLOR_NAMES = (
 )
 TEXT_COLOR_P = (0.20, 0.18, 0.08, 0.08, 0.07, 0.07, 0.04, 0.05, 0.09, 0.05, 0.05, 0.04)
 
-STROKE_PROB = 0.40
+STROKE_PROB = 0.18
 SHADOW_PROB = 0.08
 STROKE_SIZES = (1, 2, 3, 4, 6)
 STROKE_SIZE_P = (0.35, 0.30, 0.20, 0.10, 0.05)
@@ -247,15 +247,15 @@ BG_NOISE_PROB = 0.35
 BG_HATCH_PROB = 0.22
 BG_COLOR_ART_PROB = 0.65
 BUBBLE_FILL_MODES = ("white", "gray", "tint", "tone", "dark")
-BUBBLE_FILL_P = (0.45, 0.20, 0.10, 0.15, 0.10)
+BUBBLE_FILL_P = (0.65, 0.15, 0.08, 0.05, 0.07)
 
-HOLLOW_PROB = 0.12
+HOLLOW_PROB = 0.06
 GRADIENT_FILL_PROB = 0.12
 STRIPE_FILL_PROB = 0.10
 EXTRUDE_PROB = 0.15
-DISTRESS_PROB = 0.22
+DISTRESS_PROB = 0.10
 FAINT_PROB = 0.10
-FG_OCCLUDE_PROB = 0.35
+FG_OCCLUDE_PROB = 0.12
 DEGRADE_JPEG_PROB = 0.5
 DEGRADE_SCALE_PROB = 0.3
 DEGRADE_BLUR_PROB = 0.25
@@ -2374,7 +2374,7 @@ class Renderer:
 
     def render_background(self, img, draw_bubble=None, tight=False, return_ink_box=False, return_info=False):
         if draw_bubble is None:
-            draw_bubble = np.random.random() < 0.7
+            draw_bubble = np.random.random() < 0.80
 
         if tight:
             draw_bubble = False

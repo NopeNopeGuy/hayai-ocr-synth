@@ -205,7 +205,13 @@ def _apply_env(env: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _iter_local_lines(path: str, text_column: str | None, source_label: str | None, max_line_len: int) -> Iterator[dict]:
+def _iter_local_lines(
+    path: str,
+    text_column: str | None,
+    source_label: str | None,
+    max_line_len: int,
+    min_line_len: int = 1,
+) -> Iterator[dict]:
     import pandas as pd
 
     from manga_ocr_dev.data.process_text import normalize_text
@@ -218,7 +224,7 @@ def _iter_local_lines(path: str, text_column: str | None, source_label: str | No
         if suffix == ".csv":
             chunks = pd.read_csv(file, chunksize=10_000)
             for chunk in chunks:
-                yield from _iter_dataframe(chunk, file, text_column, default_source, max_line_len, text_fields, normalize_text, counter)
+                yield from _iter_dataframe(chunk, file, text_column, default_source, max_line_len, text_fields, normalize_text, counter, min_line_len=min_line_len)
                 counter += len(chunk)
         elif suffix == ".parquet":
             import pyarrow.parquet as pq
@@ -226,7 +232,7 @@ def _iter_local_lines(path: str, text_column: str | None, source_label: str | No
             pf = pq.ParquetFile(file)
             for batch in pf.iter_batches(batch_size=10_000):
                 frame = batch.to_pandas()
-                yield from _iter_dataframe(frame, file, text_column, default_source, max_line_len, text_fields, normalize_text, counter)
+                yield from _iter_dataframe(frame, file, text_column, default_source, max_line_len, text_fields, normalize_text, counter, min_line_len=min_line_len)
                 counter += len(frame)
         elif suffix in {".jsonl", ".json"}:
             if suffix == ".json":
@@ -237,7 +243,7 @@ def _iter_local_lines(path: str, text_column: str | None, source_label: str | No
             for row in rows:
                 raw = row.get(text_column or "line") or row.get("text") or row.get("dialogue")
                 line = normalize_text(str(raw)) if raw is not None else ""
-                if not line or len(line) > max_line_len:
+                if not line or len(line) < min_line_len or len(line) > max_line_len:
                     continue
                 counter += 1
                 yield {
@@ -248,7 +254,7 @@ def _iter_local_lines(path: str, text_column: str | None, source_label: str | No
         else:
             for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
                 line = normalize_text(line)
-                if not line or len(line) > max_line_len:
+                if not line or len(line) < min_line_len or len(line) > max_line_len:
                     continue
                 counter += 1
                 yield {"source": default_source, "id": f"{default_source}_{counter}", "line": line}
@@ -263,6 +269,7 @@ def _iter_dataframe(
     text_fields: Sequence[str],
     normalize_text,
     offset: int,
+    min_line_len: int = 1,
 ) -> Iterator[dict]:
     if text_column is not None:
         if text_column not in frame.columns:
@@ -279,7 +286,7 @@ def _iter_dataframe(
         if raw is None or (isinstance(raw, float) and math.isnan(raw)):
             continue
         line = normalize_text(str(raw))
-        if not line or len(line) > max_line_len:
+        if not line or len(line) < min_line_len or len(line) > max_line_len:
             continue
         source = str(row["source"]) if has_source and row.get("source") is not None else default_source
         line_id = str(row["id"]) if has_id and row.get("id") is not None else f"{default_source}_{offset + row_idx}"
@@ -288,6 +295,9 @@ def _iter_dataframe(
 
 def _iter_text_items(cfg: dict) -> Iterator[dict]:
     lines = str(cfg["lines"])
+    min_len = int(cfg.get("min_line_len") or 1)
+    max_len = int(cfg["max_line_len"])
+    seed = int(cfg.get("seed") or 42)
     if lines.startswith("hf:"):
         spec = lines[3:]
         if spec.startswith("dialogue"):
@@ -298,8 +308,8 @@ def _iter_text_items(cfg: dict) -> Iterator[dict]:
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_DIALOGUE_DATASET,
                 splits=splits,
                 streaming=True,
-                min_len=1,
-                max_len=int(cfg["max_line_len"]),
+                min_len=min_len,
+                max_len=max_len,
             )
             return
         if spec.startswith("novel"):
@@ -310,38 +320,60 @@ def _iter_text_items(cfg: dict) -> Iterator[dict]:
                 dataset_name=cfg.get("hf_dataset") or DEFAULT_NOVEL_DATASET,
                 configs=configs,
                 streaming=True,
-                min_len=1,
-                max_len=int(cfg["max_line_len"]),
+                min_len=min_len,
+                max_len=max_len,
             )
             return
-        if spec.startswith("chinese_webnovel") or spec == "zh":
+        if spec.startswith("wikipedia:") or spec in {"en_wiki", "zh_wiki", "ko_wiki"}:
+            from tools.fetch_multilingual_lines import stream_wikipedia_lines
+
+            wiki_lang = spec.split(":", 1)[1] if ":" in spec else spec.split("_", 1)[0]
+            for idx, line in enumerate(
+                stream_wikipedia_lines(wiki_lang, limit=1_000_000, min_chars=min_len, max_chars=max_len, seed=seed)
+            ):
+                yield {"source": f"wikipedia_{wiki_lang}", "id": f"wiki_{wiki_lang}_{idx}", "line": line}
+            return
+        if spec.startswith("opensubtitles:") or spec in {"en_opensubtitles", "zh_opensubtitles", "ko_opensubtitles"}:
+            from tools.fetch_multilingual_lines import stream_opensubtitles_lines
+
+            sub_lang = spec.split(":", 1)[1] if ":" in spec else spec.split("_", 1)[0]
+            for idx, line in enumerate(
+                stream_opensubtitles_lines(sub_lang, limit=1_000_000, min_chars=min_len, max_chars=max_len, seed=seed)
+            ):
+                yield {"source": f"opensubtitles_{sub_lang}", "id": f"opensub_{sub_lang}_{idx}", "line": line}
+            return
+        if spec in {"zh", "chinese", "chinese_mixed"}:
             from tools.fetch_multilingual_lines import stream_chinese_lines
 
-            for idx, line in enumerate(stream_chinese_lines(limit=1000000)):
-                yield {"source": "wdndev_webnovel_chinese", "id": f"zh_webnovel_{idx}", "line": line}
+            for idx, line in enumerate(stream_chinese_lines(limit=1_000_000, seed=seed)):
+                if min_len <= len(line) <= max_len:
+                    yield {"source": "zh_opensubtitles_wiki", "id": f"zh_mix_{idx}", "line": line}
             return
-        if spec.startswith("english_discord") or spec == "en":
+        if spec in {"en", "english", "english_mixed"}:
             from tools.fetch_multilingual_lines import stream_english_lines
 
-            for idx, line in enumerate(stream_english_lines(limit=1000000)):
-                yield {"source": "mookiezi_discord_dialogues", "id": f"en_discord_{idx}", "line": line}
+            for idx, line in enumerate(stream_english_lines(limit=1_000_000, seed=seed)):
+                if min_len <= len(line) <= max_len:
+                    yield {"source": "en_opensubtitles_wiki", "id": f"en_mix_{idx}", "line": line}
             return
-        if spec.startswith("korean") or spec == "ko":
+        if spec in {"ko", "korean", "korean_mixed", "korean_wiki"}:
             from tools.fetch_multilingual_lines import stream_korean_lines
 
-            for idx, line in enumerate(stream_korean_lines(limit=1000000)):
-                yield {"source": "korean_wiki_dialogue", "id": f"ko_line_{idx}", "line": line}
+            for idx, line in enumerate(stream_korean_lines(limit=1_000_000, seed=seed)):
+                if min_len <= len(line) <= max_len:
+                    yield {"source": "ko_opensubtitles_wiki", "id": f"ko_mix_{idx}", "line": line}
             return
         raise ValueError(
             "--lines hf:... must be hf:dialogue[:splits], hf:novel[:configs], "
-            "hf:chinese_webnovel, hf:english_discord, or hf:korean"
+            "hf:wikipedia:<lang>, hf:opensubtitles:<lang>, hf:zh, hf:en, or hf:ko"
         )
 
     yield from _iter_local_lines(
         path=lines,
         text_column=cfg.get("text_column"),
         source_label=cfg.get("source_label"),
-        max_line_len=int(cfg["max_line_len"]),
+        max_line_len=max_len,
+        min_line_len=min_len,
     )
 
 
@@ -695,6 +727,9 @@ def _cfg_from_args(args: argparse.Namespace) -> dict:
         "hf_dataset": args.hf_dataset,
         "hf_splits": args.hf_splits,
         "hf_configs": args.hf_configs,
+        "min_line_len": int(args.min_line_len),
+        "min_line_len": int(args.min_line_len),
+        "min_line_len": int(args.min_line_len),
         "max_line_len": int(args.max_line_len),
         "dedup_window": int(args.dedup_window),
         "language": args.language,
@@ -1110,18 +1145,22 @@ def cmd_upload(args: argparse.Namespace) -> int:
     files = _shard_files(args)
     validate_shards(files)
     api = HfApi(token=_token(args.token))
-    existing = set(api.list_repo_files(args.repo_id, repo_type="dataset"))
-    new_files = [path for path in files if f"data/{path.name}" not in existing]
-    skipped = len(files) - len(new_files)
-    if skipped:
-        print(f"Skipping {skipped} shard(s) that already exist in {args.repo_id}.")
+    delete_patterns = getattr(args, "delete_patterns", None) or None
+    if delete_patterns:
+        new_files = list(files)
+    else:
+        existing = set(api.list_repo_files(args.repo_id, repo_type="dataset"))
+        new_files = [path for path in files if f"data/{path.name}" not in existing]
+        skipped = len(files) - len(new_files)
+        if skipped:
+            print(f"Skipping {skipped} shard(s) that already exist in {args.repo_id}.")
     if not new_files:
         print("Nothing to upload.")
         return 0
 
     commit = args.commit_message or f"Append {len(new_files)} {args.split or 'synthetic'} shard(s)"
     if hasattr(api, "upload_folder"):
-        api.upload_folder(
+        upload_kwargs = dict(
             folder_path=str(new_files[0].parent),
             path_in_repo="data",
             repo_id=args.repo_id,
@@ -1130,6 +1169,9 @@ def cmd_upload(args: argparse.Namespace) -> int:
             commit_message=commit,
             token=_token(args.token),
         )
+        if delete_patterns:
+            upload_kwargs["delete_patterns"] = delete_patterns
+        api.upload_folder(**upload_kwargs)
     else:  # pragma: no cover - very old huggingface_hub
         for path in new_files:
             api.upload_file(
@@ -1258,6 +1300,9 @@ def _add_generate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hf-dataset", default=None, help="override the HF dataset id for hf:dialogue / hf:novel")
     parser.add_argument("--hf-splits", default=None, help="comma-separated dialogue splits (hf:dialogue)")
     parser.add_argument("--hf-configs", default=None, help="comma-separated novel configs (hf:novel)")
+    parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
+    parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
+    parser.add_argument("--min-line-len", type=int, default=1, help="skip shorter source lines")
     parser.add_argument("--max-line-len", type=int, default=200, help="skip longer source lines")
     parser.add_argument("--dedup-window", type=int, default=50000, help="rolling duplicate window (0 disables)")
 
@@ -1326,6 +1371,12 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     up.add_argument("--token", default=None, help="HF token (default: $HF_TOKEN)")
     up.add_argument("--commit-message", default=None)
+    up.add_argument(
+        "--delete-patterns",
+        action="append",
+        default=None,
+        help="glob patterns under data/ to delete atomically in the same upload commit",
+    )
     up.set_defaults(func=cmd_upload)
 
     card = sub.add_parser("update-card", help="add new rows to the README split counts")
