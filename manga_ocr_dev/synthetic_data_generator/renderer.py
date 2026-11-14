@@ -178,7 +178,7 @@ SLANT_STRONG_PROB = 0.20
 DIALOGUE_FONT_SIZE_RANGE = (26, 56)
 DIALOGUE_LINE_HEIGHT_RANGE = (0.22, 0.62)
 
-SFX_FONT_SIZE_RANGE = (38, 190)
+SFX_FONT_SIZE_RANGE = (54, 180)
 SFX_CHAR_SCALE_RANGE = (0.85, 1.35)
 SFX_LINE_SCALE_RANGE = (0.88, 1.15)
 SFX_PERSP_RANGE = (0.04, 0.18)
@@ -254,7 +254,7 @@ GRADIENT_FILL_PROB = 0.12
 STRIPE_FILL_PROB = 0.10
 EXTRUDE_PROB = 0.15
 DISTRESS_PROB = 0.10
-FAINT_PROB = 0.10
+FAINT_PROB = 0.04
 FG_OCCLUDE_PROB = 0.12
 DEGRADE_JPEG_PROB = 0.5
 DEGRADE_SCALE_PROB = 0.3
@@ -280,8 +280,8 @@ MIN_OUTPUT_SIDE = 32  # px, tiny slivers are not useful OCR samples
 MAX_OUTPUT_ASPECT = 12.0  # hard cap for very long strips
 STRIP_ASPECT = 6.0  # strips beyond this must still contain large, visible text
 MIN_EFFECTIVE_FONT = 16.0  # px after the final 600px downscale
-MIN_VISIBLE_TEXT_FRAC = 0.50  # share of ink pixels that must contrast with the background
-MIN_TEXT_CONTRAST = 28.0  # luminance difference (0-255) counted as visible
+MIN_VISIBLE_TEXT_FRAC = 0.70  # share of ink pixels that must contrast with the background
+MIN_TEXT_CONTRAST = 45.0  # luminance difference (0-255) counted as visible
 MIN_TEXT_ALPHA_FOR_QUALITY = 0.20
 RENDER_ATTEMPTS = 3  # retries for random background/bubble sampling
 SAMPLE_ATTEMPTS = 4  # retries that resample the text layout in the generator
@@ -863,12 +863,13 @@ def _scan_model_bgr(img):
 
 def _degrade_bgr(img, is_color):
     out = img
-    if np.random.rand() < DEGRADE_SCALE_PROB:
+    if np.random.rand() < DEGRADE_SCALE_PROB and min(out.shape[:2]) >= 48:
         h, w = out.shape[:2]
-        s = float(np.random.uniform(0.4, 0.8))
-        nh, nw = max(8, int(h * s)), max(8, int(w * s))
-        small = cv2.resize(out, (nw, nh), interpolation=cv2.INTER_AREA)
-        out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        s = float(np.random.uniform(0.65, 0.90) if min(h, w) < 120 else np.random.uniform(0.50, 0.85))
+        nh, nw = int(h * s), int(w * s)
+        if min(nh, nw) >= 36:
+            small = cv2.resize(out, (nw, nh), interpolation=cv2.INTER_AREA)
+            out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
     r = np.random.rand()
     if r < DEGRADE_BLUR_PROB * 0.6:
         out = cv2.GaussianBlur(out, (3, 3), 0)
@@ -930,17 +931,29 @@ class Renderer:
         if _RENDER_COUNT % 2000 == 0:
             _trim_native_memory()
 
-        img, params = self.render_text(lines, override_css_params)
-
-        # Crop controls are exposed through per-sample params so callers can force
-        # ``draw_bubble`` / ``tight`` instead of relying on the random defaults.
-        draw_bubble = params.get("draw_bubble", None)
+        # Decide draw_bubble BEFORE render_text so flat/unbubbled text always gets a
+        # contrasting outline and never gets faint/low-contrast ink on busy manga art.
+        pre_params = dict(override_css_params or {})
+        draw_bubble = pre_params.get("draw_bubble", None)
         if draw_bubble is not None:
             draw_bubble = bool(draw_bubble)
-        elif params.get("sfx"):
+        elif pre_params.get("sfx"):
             draw_bubble = False
-        elif params.get("bubble_prob", None) is not None:
-            draw_bubble = bool(np.random.rand() < float(params["bubble_prob"]))
+        elif pre_params.get("bubble_prob", None) is not None:
+            draw_bubble = bool(np.random.rand() < float(pre_params["bubble_prob"]))
+        else:
+            draw_bubble = bool(np.random.random() < 0.80)
+
+        pre_params["draw_bubble"] = draw_bubble
+        if not draw_bubble:
+            pre_params["faint"] = False
+            if int(pre_params.get("stroke_size") or 0) < 2:
+                pre_params["stroke_size"] = 2 if not pre_params.get("sfx") else 3
+                if not pre_params.get("stroke_color"):
+                    tc = str(pre_params.get("text_color", "black")).strip().lower()
+                    pre_params["stroke_color"] = "black" if tc == "white" else "white"
+
+        img, params = self.render_text(lines, pre_params)
 
         tight = bool(params.get("tight", bool(params.get("sfx"))))
         img, ink_box, quality = self.render_background(

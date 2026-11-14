@@ -44,7 +44,40 @@ from manga_ocr_dev.synthetic_data_generator.utils import (
     is_katakana,
 )
 
+from functools import lru_cache
+from PIL import Image, ImageDraw, ImageFont
+
 _OBSOLETE_KANA = set("ゐゑゔゕゖヰヱヷヸヹヺヵヶゎヮ")
+
+
+@lru_cache(maxsize=256)
+def _is_unicase_font(font_path: str) -> bool:
+    """Return True if a Latin font draws lowercase letters identically to uppercase."""
+    try:
+        font = ImageFont.truetype(str(font_path), 44)
+    except Exception:  # noqa: BLE001
+        return False
+
+    def _glyph_arr(ch: str):
+        im = Image.new("L", (64, 64), 0)
+        ImageDraw.Draw(im).text((32, 32), ch, font=font, fill=255, anchor="mm")
+        bbox = im.getbbox()
+        if not bbox:
+            return None
+        crop = im.crop(bbox).resize((24, 24), Image.Resampling.BILINEAR)
+        arr = np.asarray(crop, dtype=np.float32) / 255.0
+        return arr
+
+    matches = 0
+    checked = 0
+    for lo, hi in (("a", "A"), ("e", "E"), ("r", "R")):
+        a, b = _glyph_arr(lo), _glyph_arr(hi)
+        if a is None or b is None:
+            continue
+        checked += 1
+        if float(np.mean(np.abs(a - b))) < 0.08:
+            matches += 1
+    return checked >= 2 and matches >= 2
 _SMALL_KANA = set("ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
 _WS_SPLIT_RE = re.compile(r"\S+\s*")
 
@@ -183,6 +216,8 @@ class SyntheticDataGenerator:
             raise ValueError("no renderable text after filtering by font support")
         override_css_params = params_in
         text_gt = "\n".join(lines)
+        if lang == "en" and _is_unicase_font(override_css_params["font_path"]):
+            text_gt = text_gt.upper()
 
         if lang == "ja" and np.random.random() < FURIGANA_PROB_JA:
             word_prob = np.random.choice([0.33, 1.0], p=[0.3, 0.7])
@@ -401,14 +436,16 @@ class SyntheticDataGenerator:
                 override_css_params["font_path"] = self.get_random_sfx_font(lang)
             font_path = override_css_params["font_path"]
             prof = get_font_profile(font_path)
+            is_hand = prof.get("font_type") == "handwritten" if prof else False
             if prof and prof.get("is_manga", True):
                 if "font_size" not in explicit_keys:
-                    s_min = prof.get("sfx_size_min", 45)
-                    s_max = prof.get("sfx_size_max", 160)
+                    s_min = max(54, prof.get("sfx_size_min", 54))
+                    s_max = max(s_min + 20, prof.get("sfx_size_max", 160))
                     override_css_params["font_size"] = int(np.random.uniform(s_min, s_max))
                 if "stroke_size" not in explicit_keys:
-                    if np.random.rand() < prof.get("stroke_prob", 0.80):
-                        st_min = prof.get("stroke_min", 2)
+                    stroke_prob = 1.0 if is_hand else max(0.88, prof.get("stroke_prob", 0.88))
+                    if np.random.rand() < stroke_prob:
+                        st_min = max(3 if is_hand else 2, prof.get("stroke_min", 2))
                         st_max = prof.get("stroke_max", 12)
                         ratio = prof.get("stroke_ratio", 0.07)
                         calc_st = int(round(override_css_params["font_size"] * ratio))
@@ -418,6 +455,9 @@ class SyntheticDataGenerator:
                             override_css_params["stroke_color"] = "white" if text_col != "white" else "black"
                     else:
                         override_css_params["stroke_size"] = 0
+            if is_hand:
+                override_css_params.setdefault("faint", False)
+                override_css_params.setdefault("distress", False)
                 if "double_outline" not in explicit_keys:
                     override_css_params["double_outline"] = bool(np.random.rand() < prof.get("double_outline_prob", 0.30))
 
