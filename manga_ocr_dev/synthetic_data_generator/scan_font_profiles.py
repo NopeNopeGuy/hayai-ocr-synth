@@ -349,7 +349,7 @@ def detect_lang_hint(rel_path: str) -> str:
         return "ko"
     if p.startswith("chinese_additions/") or any(k in p for k in ["/简体/", "/繁体/", "/简繁/", "founder", "hanyi"]):
         return "zh"
-    if "/日文/" in p or "fot-" in p or "a-otf-" in p or "epson" in p:
+    if "/日文/" in p or "more_jp" in p or "fot-" in p or "a-otf-" in p or "epson" in p:
         return "ja"
     if p.startswith("latin_comic/"):
         return "en"

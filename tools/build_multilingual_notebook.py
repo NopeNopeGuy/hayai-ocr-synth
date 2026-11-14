@@ -326,7 +326,7 @@ def resolve_fonts() -> Path:
         for cand in local_candidates:
             if cand.is_dir():
                 # Verify it has at least one of the multilingual subfolders
-                if any((cand / sub).is_dir() for sub in ["Chinese_Additions", "Korean", "Latin_Comic", "精简包"]):
+                if any((cand / sub).is_dir() for sub in ["Chinese_Additions", "Korean", "Latin_Comic", "精简包", "More_JP"]):
                     print(f"Found local font root: {cand}")
                     return cand.resolve()
 
@@ -345,7 +345,7 @@ def resolve_fonts() -> Path:
             "zh": ["Chinese_Additions/**", "精简包/简体/**", "精简包/繁体/**", "精简包/简繁/**"],
             "ko": ["Korean/**"],
             "en": ["Latin_Comic/**"],
-            "ja": ["精简包/日文/**", "Chinese_Additions/**"],
+            "ja": ["More_JP/**", "精简包/日文/**", "完整包/**"],
         }
         patterns = lang_patterns.get(LANGUAGE)
 
