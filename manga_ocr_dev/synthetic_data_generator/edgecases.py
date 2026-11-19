@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-CLEAN_BG_MIN_EFFECTIVE_FONT = 10.5
+CLEAN_BG_MIN_EFFECTIVE_FONT = 13.0
 VOICING_MARKS = frozenset("\u3099\u309a\u309b\u309c\uff9e\uff9f")
 DAKUTEN_MARKS = frozenset("\u3099\u309b\uff9e")
 HANDAKUTEN_MARKS = frozenset("\u309a\u309c\uff9f")
@@ -511,11 +511,11 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
     out = img
     h, w = out.shape[:2]
     if min(h, w) > 90 and np.random.rand() < 0.55:
-        target_short = int(np.random.randint(52, min(138, min(h, w))))
+        target_short = int(np.random.randint(68, min(144, min(h, w))))
         scale = target_short / float(min(h, w))
         nw, nh = max(34, int(round(w * scale))), max(34, int(round(h * scale)))
         if max(nw, nh) / max(1, min(nw, nh)) <= max_output_aspect:
-            interp = cv2.INTER_AREA if np.random.rand() < 0.72 else cv2.INTER_NEAREST
+            interp = cv2.INTER_NEAREST if (target_short >= 76 and np.random.rand() < 0.08) else cv2.INTER_AREA
             out = cv2.resize(out, (nw, nh), interpolation=interp)
 
     if not is_color and np.random.rand() < 0.45:
@@ -544,91 +544,9 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
 # =============================================================================
 # Targeted ~100k edge-case dataset generator (called by modal/modal_app.py)
 # =============================================================================
-_JA_AFTERWORD_BLOCKS = [
-    [
-        "ご購読まことにありがとうございました！",
-        "超ひさしぶりの本です。",
-        "ペンネームを少し改名したりしました。",
-        "もう長いことこういうキャラを愛でている気がします。",
-        "そして⇧と同じくらい黒髪センターパートのキャラが好きです。",
-        "体調管理には気をつけましょう。",
-    ],
-    [
-        "お手に取っていただきありがとうございます！",
-        "今回は前から描きたかったネタをやっと形にできました。",
-        "締切ギリギリでしたが何とか間に合ってよかったです。",
-        "背景のトーン作業が一番大変でした…！",
-        "感想などいただけたらすごく嬉しいです。",
-        "次回もよろしくお願いします♪",
-    ],
-    [
-        "ここまで読んでくださって感謝です！",
-        "ページ数が予定より少し増えてしまいました。",
-        "巻末におまけページも収録しています。",
-        "描き下ろしイラストもぜひチェックしてください★",
-        "それではまた次の作品でお会いしましょう。",
-    ],
-    [
-        "※この物語はフィクションです。",
-        "実在の人物・団体・事件とは一切関係ありません。",
-        "発行日：2026年11月19日 初版発行",
-        "印刷所：株式会社サンプル印刷",
-        "無断転載・複製を禁じます。",
-    ],
-    [
-        "久しぶりの新刊になりました。",
-        "表紙デザインもすごく可愛く仕上がっています。",
-        "キャラクターの表情を描くのがとても楽しかったです。",
-        "誤字脱字があったらごめんなさい！",
-        "SNSのフォローもよろしくお願いします。",
-        "またイベントでお会いしましょう！",
-    ],
-    [
-        "アンケートや応援メッセージいつも励みになります。",
-        "次巻の発売は来春を予定しています。",
-        "設定資料は公式サイトでも公開中です。",
-        "少し駆け足になってしまった部分もありますが楽しんで頂けたら幸いです。",
-        "これからもマイペースに更新していく予定です。",
-    ],
-]
-
-_JA_NONSTANDARD_VOICED_BASES = [
-    "ん", "あ", "い", "う", "え", "お",
-    "ぁ", "ぃ", "ぅ", "ぇ", "ぉ",
-    "ン", "ア", "イ", "ウ", "エ", "オ",
-]
-_JA_TRAIL_KANA_HIRA = ["っ", "ッ", "い", "ぃ", "ぁ", "ぅ", "ぇ", "ぉ", "あ", "ん", "ー"]
-_JA_TRAIL_KANA_KATA = ["ッ", "ァ", "ィ", "ゥ", "ェ", "ォ", "ア", "ン", "ー"]
-_JA_END_PUNCT = ["", "", "", "！", "っ", "ッ", "…", "♡", "？", "！？", "っ！", "ッ！"]
-
-# Authentic manga vocalizations / moans / shouts with non-standard dakuten
-_JA_DAKUTEN_WORDS = [
-    "ん{d}ッい", "ん{d}っぃ", "ん{d}っ", "ん{d}ッ", "ん{d}ぁ", "ん{d}あ{d}",
-    "ん{d}ん{d}", "ん{d}ん{d}っ", "ん{d}ぐっ", "ん{d}ふっ", "ん{d}ぅっ",
-    "ん{d}ーっ", "ん{d}ーっ！", "ん{d}っ♡", "ん{d}ぉっ", "ん{d}あっ",
-    "あ{d}ッ", "あ{d}っ", "あ{d}ぁ{d}", "あ{d}あ{d}っ", "あ{d}あ{d}あ{d}っ！",
-    "い{d}っ", "い{d}ぃ{d}", "い{d}た{d}い{d}っ", "い{d}や{d}っ",
-    "う{d}っ", "う{d}ぁ{d}っ", "う{d}ぐっ", "え{d}っ", "お{d}っ", "お{d}ぉ{d}っ",
-    "ぁ{d}っ", "ぃ{d}っ", "ぅ{d}っ", "ぇ{d}っ", "ぉ{d}っ",
-    "ン{d}ッ", "ン{d}ン{d}ッ", "ア{d}ッ", "ア{d}ア{d}ッ！", "イ{d}ッ", "ウ{d}ッ", "エ{d}ッ", "オ{d}ッ",
-    "や{d}め{d}て{d}っ", "な{d}ん{d}で{d}っ", "ぐ{d}っ", "ぎ{d}ゃ{d}あ{d}", "ご{d}ほ{d}っ", "が{d}は{d}っ",
-    "んっ…ん{d}っ", "ああ{d}っ", "ん{d}っい", "ん{d}ッぃ", "あっ…あ{d}ぁっ",
-    "はぁっ…ん{d}っ", "ん{d}っ…い{d}っ", "♡お{d}おぉっ！", "♡ん{d}っ…！",
-]
-
-# Real Japanese voiced/semi-voiced manga words & SFX (no gibberish!)
-_JA_REAL_VOICED_WORDS = [
-    "ガッ", "ゴッ", "ドッ", "バキッ", "ボコッ", "ズバァッ", "グサッ", "ドゴォッ",
-    "ビリッ", "ザワッ", "ゾクッ", "ギロッ", "ベチャッ", "ギュッ", "ブワッ", "パキッ",
-    "ポキッ", "ピキッ", "ガタッ", "ゴゴゴ", "ドドド", "ダダダ", "バタバタ", "ズキズキ",
-    "パァンッ", "バンッ", "ボンッ", "ポンッ", "ピシャッ", "ビシャッ", "プツッ", "ブツッ",
-    "ドクン", "ビクッ", "ピクッ", "ボロボロ", "ベタベタ", "ビクビク", "ドキドキ", "ゾクゾク",
-    "プルプル", "ポタポタ", "パチッ", "バチッ", "ブチッ", "プチッ", "ズドン", "ドカン",
-    "ぐっ", "ごほっ", "だめっ", "ばかっ", "びくっ", "ぴくっ", "どきっ", "ぞくっ", "ぷるっ",
-    "ぎゅっ", "ぶわっ", "べたっ", "じわっ", "がたっ", "ぱっ", "ぽっ", "ぶっ", "ぷっ",
-    "ごめんっ", "やばっ", "まじで", "ぜんぶ", "だよね", "ばか！", "だめ！", "ぶっ！",
-    "ゔっ", "ヴッ", "ゔぁっ", "ヴぁっ", "ばぱっ", "ぱばっ", "びぴっ", "ぶぷっ",
-]
+_RE_VOICABLE_NONSTD = frozenset("んあいうえおぁぃぅぇぉンアイウエオ")
+_RE_STD_VOICED = re.compile(r"[が-ござ-ぞだ-どば-ぽゔガ-ゴザ-ゾダ-ドバ-ポヴ]")
+_RE_WEB_BOILERPLATE = re.compile(r"(?:続きを読む|次の話へ|前の話へ|目次へ|ブックマーク)")
 
 _RE_OPEN_TO_CLOSE = {"「": "」", "『": "』", "（": "）", "(": ")"}
 _RE_CLOSE_TO_OPEN = {v: k for k, v in _RE_OPEN_TO_CLOSE.items()}
@@ -700,7 +618,7 @@ def import_repo_normalizer():
     return _fallback_normalize
 
 
-def _wrap_passage_to_lines(text: str, min_len: int = 6, max_len: int = 34) -> list[str]:
+def _wrap_passage_to_lines(text: str, min_len: int = 6, max_len: int = 30) -> list[str]:
     """Split a coherent Japanese passage into clean complete sentences/clauses (never mid-word)."""
     aozora_ruby = re.compile(r"｜?([^《\r\n]+)《[^》\r\n]+》")
     aozora_notes = re.compile(r"［＃[^］\r\n]+］")
@@ -710,7 +628,7 @@ def _wrap_passage_to_lines(text: str, min_len: int = 6, max_len: int = 34) -> li
     out: list[str] = []
     for raw_para in text.splitlines():
         para = _clean_jp_line(raw_para)
-        if not para or "http" in para or "==" in para or len(para) < min_len:
+        if not para or "http" in para or "==" in para or _RE_WEB_BOILERPLATE.search(para) or len(para) < min_len:
             continue
         if not _RE_HAS_KANA.search(para):
             continue
@@ -744,8 +662,8 @@ def load_ja_corpora(
     limit_blocks: int = 45_000,
     lines_path: str = "",
     commit_fn=None,
-) -> tuple[list[list[str]], list[str]]:
-    """Return (coherent_paragraph_blocks, real_dakuten_lines) harvested from novels & dialogue."""
+) -> tuple[list[list[str]], list[str], list[str], list[str]]:
+    """Return (paragraph_blocks, real_dakuten, real_voiced, real_exclam) harvested from novels & dialogue."""
     import json
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -758,49 +676,67 @@ def load_ja_corpora(
             rows = [_clean_jp_line(str(x)) for x in tbl[col].to_pylist() if x]
         else:
             rows = [_clean_jp_line(ln) for ln in p.read_text(encoding="utf-8").splitlines()]
-        rows = [r for r in rows if 6 <= len(r) <= 34 and _RE_HAS_KANA.search(r)]
+        rows = [r for r in rows if 6 <= len(r) <= 30 and _RE_HAS_KANA.search(r)]
         blocks = [rows[i : i + 6] for i in range(0, len(rows) - 5, 6)]
         if blocks:
             print(f"Loaded {len(blocks):,} paragraph blocks from local lines_path={p}")
-            return blocks, []
+            return blocks, [], [], []
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    blk_file = cache_dir / "ja_edgecase_blocks_v3.parquet"
-    dak_file = cache_dir / "ja_edgecase_dakuten_v3.parquet"
-    if blk_file.is_file():
+    blk_file = cache_dir / "ja_edgecase_blocks_v4.parquet"
+    dak_file = cache_dir / "ja_edgecase_dakuten_v4.parquet"
+    voi_file = cache_dir / "ja_edgecase_voiced_v4.parquet"
+    exc_file = cache_dir / "ja_edgecase_exclam_v4.parquet"
+    if blk_file.is_file() and voi_file.is_file() and exc_file.is_file():
         raw_blks = pq.read_table(blk_file)["lines_json"].to_pylist()
         blocks = [json.loads(x) for x in raw_blks if x]
         d_rows = [str(x) for x in pq.read_table(dak_file)["line"].to_pylist() if x] if dak_file.is_file() else []
-        if len(blocks) >= 2_000:
-            print(f"Reusing cached coherent corpora (v3): {len(blocks):,} blocks, {len(d_rows):,} real dakuten lines")
-            return blocks, d_rows
+        v_rows = [str(x) for x in pq.read_table(voi_file)["line"].to_pylist() if x]
+        e_rows = [str(x) for x in pq.read_table(exc_file)["line"].to_pylist() if x]
+        if len(blocks) >= 2_000 and len(v_rows) >= 500:
+            print(
+                f"Reusing cached corpora (v4): {len(blocks):,} blocks, "
+                f"{len(d_rows):,} dakuten, {len(v_rows):,} voiced, {len(e_rows):,} exclamations"
+            )
+            return blocks, d_rows, v_rows, e_rows
 
     blocks: list[list[str]] = []
     real_dakuten: list[str] = []
+    real_voiced: list[str] = []
+    real_exclam: list[str] = []
     nonstd_dak_re = re.compile(r"[んあいうえおぁぃぅぇぉンアイウエオ][゛\u3099ﾞ]")
+
+    def _harvest_short(ln: str) -> None:
+        if not (2 <= len(ln) <= 9) or re.search(r"[A-Za-z0-9~]", ln):
+            return
+        if len(real_dakuten) < 35_000 and nonstd_dak_re.search(ln):
+            real_dakuten.append(ln)
+        elif len(real_voiced) < 40_000 and len(ln) <= 8 and _RE_STD_VOICED.search(ln):
+            real_voiced.append(ln)
+        elif (
+            len(real_exclam) < 40_000
+            and len(ln) <= 7
+            and not re.search(r"[\u4e00-\u9fff]", ln)
+            and any(ch in _RE_VOICABLE_NONSTD for ch in ln)
+        ):
+            real_exclam.append(ln)
 
     def _harvest_block(raw_text: str, cap: int) -> None:
         if not raw_text:
             return
-        lines = _wrap_passage_to_lines(raw_text, min_len=6, max_len=34)
-        for ln in lines:
-            if (
-                2 <= len(ln) <= 10
-                and len(real_dakuten) < 35_000
-                and nonstd_dak_re.search(ln)
-                and not re.search(r"[A-Za-z0-9~]", ln)
-            ):
-                real_dakuten.append(ln)
+        all_lines = _wrap_passage_to_lines(raw_text, min_len=2, max_len=30)
+        for ln in all_lines:
+            _harvest_short(ln)
+        lines = [ln for ln in all_lines if len(ln) >= 6]
         if len(blocks) >= cap or len(lines) < 3:
             return
-        # Slice coherent windows of 3..9 consecutive lines from the SAME passage
         idx = 0
         while idx + 3 <= len(lines) and len(blocks) < cap:
             win = min(len(lines) - idx, 9)
             blocks.append(lines[idx : idx + win])
             idx += max(3, win // 2)
 
-    # Tier 1: OmniAICreator/Japanese-Novels-23M (real afterwords + coherent prose + NSFW dakuten)
+    # Tier 1: OmniAICreator/Japanese-Novels-23M (afterwords + coherent prose + NSFW dakuten)
     try:
         from datasets import load_dataset
 
@@ -810,7 +746,7 @@ def load_ja_corpora(
         for cfg in configs:
             target = min(novel_cap, len(blocks) + per_cfg)
             try:
-                print(f"Streaming Japanese-Novels-23M ({cfg}) [coherent afterwords + prose + dakuten]...")
+                print(f"Streaming Japanese-Novels-23M ({cfg}) [afterwords + prose + dakuten]...")
                 ds = load_dataset("OmniAICreator/Japanese-Novels-23M", cfg, split="train", streaming=True)
                 for row in ds:
                     for field in ("afterword", "atogaki", "preface", "maegaki", "synopsis"):
@@ -824,11 +760,14 @@ def load_ja_corpora(
                         break
             except Exception as exc:
                 print(f"Japanese-Novels-23M ({cfg}) notice: {exc}")
-        print(f"Collected {len(blocks):,} coherent novel/afterword blocks & {len(real_dakuten):,} real dakuten lines.")
+        print(
+            f"Collected {len(blocks):,} blocks, {len(real_dakuten):,} dakuten, "
+            f"{len(real_voiced):,} voiced, {len(real_exclam):,} exclamations from novels."
+        )
     except Exception as exc:
         print(f"Japanese-Novels-23M streaming notice: {exc}")
 
-    # Tier 2: JustANormalTinkerer/Japanese-Dialogue-Dataset (consecutive subtitle lines from same episode!)
+    # Tier 2: JustANormalTinkerer/Japanese-Dialogue-Dataset
     try:
         from datasets import load_dataset
 
@@ -848,21 +787,23 @@ def load_ja_corpora(
                             blocks.append(buf[:9])
                         cur_file = sf
                         buf = []
-                    if 6 <= len(val) <= 32 and _RE_HAS_KANA.search(val):
-                        buf.append(val)
-                        if len(buf) >= 8:
-                            blocks.append(buf)
-                            buf = []
+                    if _RE_HAS_KANA.search(val) and not _RE_WEB_BOILERPLATE.search(val):
+                        _harvest_short(val)
+                        if 6 <= len(val) <= 30:
+                            buf.append(val)
+                            if len(buf) >= 8:
+                                blocks.append(buf)
+                                buf = []
                     if len(blocks) >= limit_blocks:
                         break
             except Exception as exc:
                 print(f"Japanese-Dialogue-Dataset ({sp}) notice: {exc}")
-        print(f"Total coherent blocks after dialogue dataset: {len(blocks):,}")
+        print(
+            f"Totals after dialogue: {len(blocks):,} blocks, {len(real_dakuten):,} dakuten, "
+            f"{len(real_voiced):,} voiced, {len(real_exclam):,} exclamations."
+        )
     except Exception as exc:
         print(f"Japanese-Dialogue-Dataset streaming notice: {exc}")
-
-    # Always include built-in afterword blocks
-    blocks.extend(_JA_AFTERWORD_BLOCKS * 40)
 
     if blocks:
         tmp_f = blk_file.with_suffix(".parquet.tmp")
@@ -872,9 +813,17 @@ def load_ja_corpora(
         tmp_d = dak_file.with_suffix(".parquet.tmp")
         pq.write_table(pa.table({"line": real_dakuten}), tmp_d)
         os.replace(tmp_d, dak_file)
+    if real_voiced:
+        tmp_v = voi_file.with_suffix(".parquet.tmp")
+        pq.write_table(pa.table({"line": real_voiced}), tmp_v)
+        os.replace(tmp_v, voi_file)
+    if real_exclam:
+        tmp_e = exc_file.with_suffix(".parquet.tmp")
+        pq.write_table(pa.table({"line": real_exclam}), tmp_e)
+        os.replace(tmp_e, exc_file)
     if commit_fn is not None:
         commit_fn()
-    return blocks, real_dakuten
+    return blocks, real_dakuten, real_voiced, real_exclam
 
 
 def categorize_ja_fonts(fonts_root: Path) -> tuple[list[str], list[str], list[str]]:
@@ -959,11 +908,8 @@ def detect_line_join(repo_dir: Path, language: str, line_join: str, bg_dir: Path
 
 
 def build_clean_paragraph(rng, blocks: list[list[str]], font_path: str, is_drawable_fn) -> tuple[list[str], dict]:
-    # Choose a coherent multi-line block (never mix random unrelated sentences or strip characters!)
-    if rng.random() < 0.22:
-        src_block = list(_JA_AFTERWORD_BLOCKS[int(rng.integers(0, len(_JA_AFTERWORD_BLOCKS)))])
-    else:
-        src_block = list(blocks[int(rng.integers(0, len(blocks)))])
+    # 100% real coherent multi-line blocks from corpora (zero hardcoded text)
+    src_block = list(blocks[int(rng.integers(0, len(blocks)))])
 
     want_n = int(rng.choice([3, 4, 5, 6, 7, 8, 9], p=[0.08, 0.16, 0.22, 0.24, 0.14, 0.10, 0.06]))
     if len(src_block) > want_n:
@@ -993,7 +939,7 @@ def build_clean_paragraph(rng, blocks: list[list[str]], font_path: str, is_drawa
                 raise ValueError(f"font cannot draw {ch!r}")
 
     max_len = max(len(ln) for ln in lines)
-    font_size = int(rng.integers(22, 36)) if max_len >= 24 else int(rng.integers(26, 44))
+    font_size = int(rng.integers(26, 38)) if max_len >= 22 else int(rng.integers(28, 44))
 
     bg_roll = float(rng.random())
     on_busy_art = bg_roll > 0.90
@@ -1042,43 +988,40 @@ def build_dakuten_sample(
     dakuten_char: str,
     is_drawable_fn,
     real_dakuten: list[str] | None = None,
+    real_voiced: list[str] | None = None,
+    real_exclam: list[str] | None = None,
 ) -> tuple[list[str], dict]:
     d = dakuten_char
     r = float(rng.random())
 
-    if real_dakuten and r < 0.22:
+    def _attach_dakuten_to_real_utterance(utt: str) -> str:
+        clusters = split_graphemes_with_voicing(utt)
+        elig = [i for i, cl in enumerate(clusters) if len(cl) == 1 and cl in _RE_VOICABLE_NONSTD]
+        if not elig:
+            return utt
+        k = 1 if (len(elig) == 1 or rng.random() < 0.72) else 2
+        for idx in rng.choice(elig, size=k, replace=False):
+            clusters[int(idx)] = clusters[int(idx)] + d
+        return "".join(clusters)
+
+    if real_dakuten and r < 0.45:
         raw = _clean_jp_line(str(real_dakuten[int(rng.integers(0, len(real_dakuten)))]))
-        # Normalize any voicing mark to d
-        raw = re.sub(r"[゛\u3099ﾞ]", d, raw)
-        lines = [raw]
-    elif r < 0.62:
-        # Short punchy expressive non-standard dakuten (exact Image 2 archetype!)
-        if rng.random() < 0.60:
-            word = str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d)
-        else:
-            lead = str(_JA_NONSTANDARD_VOICED_BASES[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_BASES)))])
-            is_kata = ord(lead) >= 0x30A0
-            trail_pool = _JA_TRAIL_KANA_KATA if is_kata else _JA_TRAIL_KANA_HIRA
-            n_tail = int(rng.choice([1, 2, 3], p=[0.28, 0.46, 0.26]))
-            pieces = [lead + d]
-            for _ in range(n_tail):
-                if rng.random() < 0.22:
-                    ch2 = str(_JA_NONSTANDARD_VOICED_BASES[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_BASES)))])
-                    pieces.append(ch2 + (d if rng.random() < 0.45 else ""))
-                else:
-                    pieces.append(str(trail_pool[int(rng.integers(0, len(trail_pool)))]))
-            word = "".join(pieces) + str(_JA_END_PUNCT[int(rng.integers(0, len(_JA_END_PUNCT)))])
-        lines = [word]
-        if rng.random() < 0.22 and len(word) <= 6:
-            w2 = str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d)
-            if len(w2) <= 7:
-                lines.append(w2)
+        lines = [re.sub(r"[゛\u3099ﾞ]", d, raw)]
+    elif real_exclam and r < 0.75:
+        raw = _clean_jp_line(str(real_exclam[int(rng.integers(0, len(real_exclam)))]))
+        lines = [_attach_dakuten_to_real_utterance(raw)]
+        if rng.random() < 0.18:
+            raw2 = _clean_jp_line(str(real_exclam[int(rng.integers(0, len(real_exclam)))]))
+            lines.append(_attach_dakuten_to_real_utterance(raw2))
+    elif real_voiced:
+        lines = [_clean_jp_line(str(real_voiced[int(rng.integers(0, len(real_voiced)))]))]
+        if rng.random() < 0.20:
+            lines.append(_clean_jp_line(str(real_voiced[int(rng.integers(0, len(real_voiced)))])))
+    elif real_dakuten:
+        raw = _clean_jp_line(str(real_dakuten[int(rng.integers(0, len(real_dakuten)))]))
+        lines = [re.sub(r"[゛\u3099ﾞ]", d, raw)]
     else:
-        # Real Japanese voiced/semi-voiced manga words & SFX (no gibberish!)
-        w1 = str(_JA_REAL_VOICED_WORDS[int(rng.integers(0, len(_JA_REAL_VOICED_WORDS)))])
-        lines = [w1]
-        if rng.random() < 0.22:
-            lines.append(str(_JA_REAL_VOICED_WORDS[int(rng.integers(0, len(_JA_REAL_VOICED_WORDS)))]))
+        raise RuntimeError("No corpus lines available for dakuten synthesis.")
 
     # Keep vertical columns punchy (never ultra-skinny 15-char needles!)
     max_col_clusters = max(len(split_graphemes_with_voicing(ln)) for ln in lines)
@@ -1206,7 +1149,13 @@ def _generate_one(task: tuple[int, str]) -> dict | None:
                 f_pool = cfg["expressive_fonts"] if rng.random() < 0.72 else cfg["all_fonts"]
                 font_path = f_pool[int(rng.integers(0, len(f_pool)))]
                 lines, params = build_dakuten_sample(
-                    rng, font_path, cfg["dakuten_char"], is_drawable, cfg["real_dakuten"]
+                    rng,
+                    font_path,
+                    cfg["dakuten_char"],
+                    is_drawable,
+                    real_dakuten=cfg["real_dakuten"],
+                    real_voiced=cfg["real_voiced"],
+                    real_exclam=cfg["real_exclam"],
                 )
                 source = "edgecase_dakuten"
 
@@ -1346,7 +1295,7 @@ def run_edgecase_pipeline(
         f"n_images={n_images:,}, workers={workers}"
     )
 
-    blocks, real_dakuten = load_ja_corpora(
+    blocks, real_dakuten, real_voiced, real_exclam = load_ja_corpora(
         cache_lines_dir, lines_path=lines_path, commit_fn=commit_fn
     )
     all_fonts, clean_fonts, expr_fonts = categorize_ja_fonts(resolved_fonts_root)
@@ -1360,6 +1309,8 @@ def run_edgecase_pipeline(
         "bg_dir": str(resolved_bg_dir),
         "blocks": blocks,
         "real_dakuten": real_dakuten,
+        "real_voiced": real_voiced,
+        "real_exclam": real_exclam,
         "all_fonts": all_fonts,
         "clean_fonts": clean_fonts,
         "expressive_fonts": expr_fonts,
