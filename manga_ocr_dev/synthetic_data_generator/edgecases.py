@@ -545,7 +545,9 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
 # Targeted ~100k edge-case dataset generator (called by modal/modal_app.py)
 # =============================================================================
 _RE_VOICABLE_NONSTD = frozenset("んあいうえおぁぃぅぇぉンアイウエオ")
-_RE_STD_VOICED = re.compile(r"[が-ござ-ぞだ-どば-ぽゔガ-ゴザ-ゾダ-ドバ-ポヴ]")
+_RE_STD_VOICED = re.compile(
+    r"[がぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽゔガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ]"
+)
 _RE_WEB_BOILERPLATE = re.compile(r"(?:続きを読む|次の話へ|前の話へ|目次へ|ブックマーク)")
 
 _RE_OPEN_TO_CLOSE = {"「": "」", "『": "』", "（": "）", "(": ")"}
@@ -683,10 +685,10 @@ def load_ja_corpora(
             return blocks, [], [], []
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    blk_file = cache_dir / "ja_edgecase_blocks_v4.parquet"
-    dak_file = cache_dir / "ja_edgecase_dakuten_v4.parquet"
-    voi_file = cache_dir / "ja_edgecase_voiced_v4.parquet"
-    exc_file = cache_dir / "ja_edgecase_exclam_v4.parquet"
+    blk_file = cache_dir / "ja_edgecase_blocks_v5.parquet"
+    dak_file = cache_dir / "ja_edgecase_dakuten_v5.parquet"
+    voi_file = cache_dir / "ja_edgecase_voiced_v5.parquet"
+    exc_file = cache_dir / "ja_edgecase_exclam_v5.parquet"
     if blk_file.is_file() and voi_file.is_file() and exc_file.is_file():
         raw_blks = pq.read_table(blk_file)["lines_json"].to_pylist()
         blocks = [json.loads(x) for x in raw_blks if x]
@@ -695,7 +697,7 @@ def load_ja_corpora(
         e_rows = [str(x) for x in pq.read_table(exc_file)["line"].to_pylist() if x]
         if len(blocks) >= 2_000 and len(v_rows) >= 500:
             print(
-                f"Reusing cached corpora (v4): {len(blocks):,} blocks, "
+                f"Reusing cached corpora (v5): {len(blocks):,} blocks, "
                 f"{len(d_rows):,} dakuten, {len(v_rows):,} voiced, {len(e_rows):,} exclamations"
             )
             return blocks, d_rows, v_rows, e_rows
@@ -714,10 +716,10 @@ def load_ja_corpora(
         elif len(real_voiced) < 40_000 and len(ln) <= 8 and _RE_STD_VOICED.search(ln):
             real_voiced.append(ln)
         elif (
-            len(real_exclam) < 40_000
+            len(real_exclam) < 60_000
             and len(ln) <= 7
-            and not re.search(r"[\u4e00-\u9fff]", ln)
             and any(ch in _RE_VOICABLE_NONSTD for ch in ln)
+            and sum(1 for ch in ln if "\u3041" <= ch <= "\u30fa") >= max(2, len(ln) // 2)
         ):
             real_exclam.append(ln)
 
@@ -772,7 +774,7 @@ def load_ja_corpora(
         from datasets import load_dataset
 
         print("Streaming JustANormalTinkerer/Japanese-Dialogue-Dataset...")
-        for sp in ("anime_tv", "anime_movie", "drama_tv"):
+        for sp in ("anime_tv", "anime_movie", "drama_tv", "drama_movie", "unsorted"):
             if len(blocks) >= limit_blocks:
                 break
             try:
@@ -942,8 +944,8 @@ def build_clean_paragraph(rng, blocks: list[list[str]], font_path: str, is_drawa
     font_size = int(rng.integers(26, 38)) if max_len >= 22 else int(rng.integers(28, 44))
 
     bg_roll = float(rng.random())
-    on_busy_art = bg_roll > 0.90
-    dark_page = (not on_busy_art) and (bg_roll > 0.78)
+    on_busy_art = False
+    dark_page = bg_roll > 0.84
     if dark_page:
         v_txt = int(rng.integers(220, 256))
         text_color = f"#{v_txt:02x}{v_txt:02x}{v_txt:02x}"
@@ -1004,10 +1006,12 @@ def build_dakuten_sample(
             clusters[int(idx)] = clusters[int(idx)] + d
         return "".join(clusters)
 
-    if real_dakuten and r < 0.45:
+    # Scale real_dakuten probability by pool size so rare lines never over-repeat
+    real_dak_p = min(0.30, len(real_dakuten or []) / 10_000.0)
+    if real_dakuten and r < real_dak_p:
         raw = _clean_jp_line(str(real_dakuten[int(rng.integers(0, len(real_dakuten)))]))
         lines = [re.sub(r"[゛\u3099ﾞ]", d, raw)]
-    elif real_exclam and r < 0.75:
+    elif real_exclam and r < 0.68:
         raw = _clean_jp_line(str(real_exclam[int(rng.integers(0, len(real_exclam)))]))
         lines = [_attach_dakuten_to_real_utterance(raw)]
         if rng.random() < 0.18:
@@ -1066,7 +1070,7 @@ def build_dakuten_sample(
         "hard_manga_bg": (not draw_bubble) and bool(rng.random() < 0.65),
         "raw_scan_hard": (not draw_bubble) and bool(rng.random() < 0.58),
         "fg_occlude_prob": 0.18 if not draw_bubble else 0.08,
-        "trunc_prob": 0.05,
+        "trunc_prob": 0.0,
         "no_invert": True,
         "text_color": "white" if invert_white_text else "black",
         "stroke_color": "black" if invert_white_text else "white",
