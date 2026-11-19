@@ -1,15 +1,14 @@
 """Edge-case rendering helpers and targeted 100k synthetic generator.
 
 Covers:
-  1. Attached dakuten / handakuten on arbitrary kana (ん゛, ん\u3099, あ゛, っ゛, ン゛, etc.)
+  1. Attached dakuten / handakuten on arbitrary kana (ん゛, ん\u3099, あ゛, お゛, ン゛, etc.)
      positioned at the upper-right shoulder with unified stroke + fill and
      font / thick-brush / G-pen visual styles.
   2. Clean/hard flat-page multi-line paragraphs (white, paper bleed-through,
-     narration boxes, dark pages, down to ~10.5px effective font) to break OCR looping.
+     narration boxes, dark pages, down to ~10.5px effective font) using coherent
+     Japanese afterwords, novel blocks & dialogue to break OCR looping.
   3. Hard colliding manga line-art backgrounds and raw 3-level manga scan crops.
-  4. Sharded HF Parquet generation (--edgecase-mode in modal/modal_app.py) pulling
-     real afterwords, prose & dakuten vocalizations from Japanese-Novels-23M and
-     Japanese-Dialogue-Dataset.
+  4. Sharded HF Parquet generation (--edgecase-mode in modal/modal_app.py).
 """
 
 from __future__ import annotations
@@ -71,12 +70,22 @@ def split_graphemes_with_voicing(text: str) -> list[str]:
 # -----------------------------------------------------------------------------
 # Unified upper-right dakuten / handakuten glyph compositing
 # -----------------------------------------------------------------------------
-def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_font_fn, is_drawable_fn, safe_draw_fn, style: str = "auto"):
+def _render_voicing_mark_mask(
+    font,
+    cell: int,
+    is_handakuten: bool,
+    rng,
+    *,
+    get_font_fn,
+    is_drawable_fn,
+    safe_draw_fn,
+    style: str = "auto",
+):
     """Build a tightly cropped grayscale ('L') mask for a dakuten/handakuten mark."""
     if style == "auto" and not is_handakuten:
-        chosen = str(rng.choice(["font", "brush", "pen"], p=[0.40, 0.40, 0.20]))
+        chosen = str(rng.choice(["font", "brush", "pen"], p=[0.42, 0.38, 0.20]))
     elif is_handakuten:
-        chosen = "font" if rng.random() < 0.65 else "brush"
+        chosen = "font" if rng.random() < 0.70 else "brush"
     else:
         chosen = style
 
@@ -88,7 +97,7 @@ def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_
             if not is_drawable_fn(font_path, mark_ch):
                 continue
             try:
-                m_sz = max(8, int(round(cell * float(rng.uniform(0.85, 1.32)))))
+                m_sz = max(8, int(round(cell * float(rng.uniform(0.85, 1.28)))))
                 m_font = get_font_fn(font_path, m_sz)
                 canvas = max(32, m_sz * 2)
                 tmp = Image.new("L", (canvas, canvas), 0)
@@ -99,17 +108,20 @@ def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_
                     continue
                 crop = tmp.crop(bbox)
                 cw, ch = crop.size
-                target_h = int(round(cell * float(rng.uniform(0.24, 0.44))))
-                if ch > 0 and (ch < cell * 0.20 or ch > cell * 0.50):
-                    scale = max(0.35, min(2.6, target_h / float(ch)))
-                    crop = crop.resize((max(3, int(round(cw * scale))), max(3, int(round(ch * scale)))), Image.BICUBIC)
-                rot = float(rng.uniform(-14.0, 14.0))
+                target_h = int(round(cell * float(rng.uniform(0.24, 0.40))))
+                if ch > 0 and (ch < cell * 0.20 or ch > cell * 0.46):
+                    scale = max(0.35, min(2.4, target_h / float(ch)))
+                    crop = crop.resize(
+                        (max(3, int(round(cw * scale))), max(3, int(round(ch * scale)))),
+                        Image.BICUBIC,
+                    )
+                rot = float(rng.uniform(-12.0, 12.0))
                 if abs(rot) > 1.0:
                     crop = crop.rotate(rot, resample=Image.BICUBIC, expand=True, fillcolor=0)
                     bb2 = crop.getbbox()
                     if bb2 is not None:
                         crop = crop.crop(bb2)
-                if not is_handakuten and rng.random() < 0.40 and cell >= 32:
+                if not is_handakuten and rng.random() < 0.35 and cell >= 32:
                     k_sz = int(rng.choice([2, 3])) if cell >= 64 else 2
                     arr = cv2.dilate(np.asarray(crop), np.ones((k_sz, k_sz), np.uint8), iterations=1)
                     crop = Image.fromarray(arr, mode="L")
@@ -119,8 +131,8 @@ def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_
 
     ss = 2
     if is_handakuten:
-        diam = max(6, int(round(cell * float(rng.uniform(0.22, 0.36)))))
-        thick = max(2, int(round(diam * float(rng.uniform(0.18, 0.30)))))
+        diam = max(6, int(round(cell * float(rng.uniform(0.22, 0.34)))))
+        thick = max(2, int(round(diam * float(rng.uniform(0.18, 0.28)))))
         c_sz = (diam + thick * 2 + 8) * ss
         tmp = Image.new("L", (c_sz, c_sz), 0)
         d = ImageDraw.Draw(tmp)
@@ -130,11 +142,10 @@ def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_
         bb = tmp.getbbox()
         return tmp.crop(bb) if bb else tmp
 
-    # Expressive brush ('||', '\\') or rough hand-lettered G-pen dakuten strokes
-    mh = max(8, int(round(cell * float(rng.uniform(0.27, 0.46)))))
-    tick_w = max(2, int(round(cell * float(rng.uniform(0.072, 0.138) if chosen == "brush" else rng.uniform(0.045, 0.085)))))
-    gap = max(tick_w + 2, int(round(cell * float(rng.uniform(0.12, 0.22)))))
-    slant_dx = int(round(mh * float(rng.uniform(-0.10, 0.36))))
+    mh = max(8, int(round(cell * float(rng.uniform(0.26, 0.42)))))
+    tick_w = max(2, int(round(cell * float(rng.uniform(0.068, 0.125) if chosen == "brush" else rng.uniform(0.045, 0.082)))))
+    gap = max(tick_w + 2, int(round(cell * float(rng.uniform(0.11, 0.20)))))
+    slant_dx = int(round(mh * float(rng.uniform(-0.08, 0.34))))
     cw = (abs(slant_dx) + gap + tick_w * 4 + 14) * ss
     ch = (mh + tick_w * 4 + 14) * ss
     tmp = Image.new("L", (cw, ch), 0)
@@ -143,21 +154,21 @@ def _render_voicing_mark_mask(font, cell: int, is_handakuten: bool, rng, *, get_
     y_start = (tick_w + 7) * ss
 
     for i in range(2):
-        jx0 = int(round(float(rng.uniform(-0.07, 0.07)) * mh * ss))
-        jy0 = int(round(float(rng.uniform(-0.10, 0.10)) * mh * ss))
-        jy1 = int(round(float(rng.uniform(-0.10, 0.10)) * mh * ss))
+        jx0 = int(round(float(rng.uniform(-0.06, 0.06)) * mh * ss))
+        jy0 = int(round(float(rng.uniform(-0.08, 0.08)) * mh * ss))
+        jy1 = int(round(float(rng.uniform(-0.08, 0.08)) * mh * ss))
         x0 = x_start + i * gap * ss + jx0
         y0 = y_start + jy0
         x1 = x0 + slant_dx * ss
         y1 = y_start + mh * ss + jy1
-        w_ss = max(2, int(round(tick_w * ss * float(rng.uniform(0.85, 1.20)))))
+        w_ss = max(2, int(round(tick_w * ss * float(rng.uniform(0.85, 1.18)))))
         if chosen == "pen":
-            xm = int((x0 + x1) / 2 + float(rng.uniform(-0.14, 0.14)) * mh * ss)
+            xm = int((x0 + x1) / 2 + float(rng.uniform(-0.12, 0.12)) * mh * ss)
             ym = int((y0 + y1) / 2)
             d.line([(x0, y0), (xm, ym), (x1, y1)], fill=255, width=w_ss, joint="curve")
         else:
-            hw0 = max(1, int(round(w_ss * float(rng.uniform(0.42, 0.58)))))
-            hw1 = max(1, int(round(w_ss * float(rng.uniform(0.32, 0.52)))))
+            hw0 = max(1, int(round(w_ss * float(rng.uniform(0.42, 0.56)))))
+            hw1 = max(1, int(round(w_ss * float(rng.uniform(0.34, 0.50)))))
             poly = [(x0 - hw0, y0), (x0 + hw0, y0), (x1 + hw1, y1), (x1 - hw1, y1)]
             d.polygon(poly, fill=255)
         r = max(1, w_ss // 3)
@@ -244,17 +255,17 @@ def draw_attached_voicing_char(
     )
     mw, mh = mark_mask.size
 
-    place_roll = float(rng.random())
-    if place_roll < 0.48:
-        # Tucked tightly into the upper-right pocket (exact Image 2 style for ん゛/い゛/あ゛)
-        mx = int(round(bx1 - mw * float(rng.uniform(0.22, 0.55)) + cell * float(rng.uniform(0.0, 0.08))))
-        my = int(round(by0 - mh * float(rng.uniform(-0.08, 0.22)) + bh * float(rng.uniform(0.0, 0.08))))
-    elif place_roll < 0.82:
-        mx = int(round(bx1 - mw * float(rng.uniform(0.02, 0.24)) + cell * float(rng.uniform(0.02, 0.11))))
-        my = int(round(by0 - mh * float(rng.uniform(0.04, 0.28)) + bh * float(rng.uniform(0.0, 0.10))))
+    # Hug the upper-right shoulder closely so dakuten never looks detached
+    if base in ("ん", "ン", "い", "イ", "し", "レ") and rng.random() < 0.70:
+        # Tucked right into the upper-right pocket (Image 2 style for ん゛)
+        mx = int(round(bx1 - mw * float(rng.uniform(0.32, 0.62)) + cell * float(rng.uniform(0.0, 0.06))))
+        my = int(round(by0 - mh * float(rng.uniform(-0.10, 0.14)) + bh * float(rng.uniform(0.0, 0.08))))
+    elif rng.random() < 0.75:
+        mx = int(round(bx1 - mw * float(rng.uniform(0.06, 0.30)) + cell * float(rng.uniform(0.01, 0.08))))
+        my = int(round(by0 - mh * float(rng.uniform(0.02, 0.20)) + bh * float(rng.uniform(0.0, 0.08))))
     else:
-        mx = int(round(bx1 + cell * float(rng.uniform(0.03, 0.14))))
-        my = int(round(by0 + bh * float(rng.uniform(-0.06, 0.14))))
+        mx = int(round(bx1 + cell * float(rng.uniform(0.02, 0.09))))
+        my = int(round(by0 + bh * float(rng.uniform(-0.04, 0.10))))
 
     margin_clamp = sw + 2
     mx = max(margin_clamp, min(size - mw - margin_clamp, mx))
@@ -269,7 +280,6 @@ def draw_attached_voicing_char(
     edge_rgba = stroke_fill if isinstance(stroke_fill, tuple) and len(stroke_fill) == 4 else fill_rgba
     is_hollow = fill_rgba[3] == 0
 
-    # Pass 1: Unified outer stroke for both base glyph and attached mark.
     if sw > 0 and stroke_fill is not None:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * sw + 1, 2 * sw + 1))
         dil = cv2.dilate(np.asarray(mark_full), kernel, iterations=1)
@@ -287,7 +297,6 @@ def draw_attached_voicing_char(
             mark_stroke.putalpha(Image.fromarray(dil_alpha, mode="L"))
             tile = Image.alpha_composite(tile, mark_stroke)
 
-    # Pass 2: Unified inner fill for both base glyph and attached mark.
     if not is_hollow:
         draw = ImageDraw.Draw(tile)
         safe_draw_fn(draw, (tcx, tcy), base, fill=fill_rgba, **base_kw)
@@ -353,11 +362,11 @@ def render_clean_background(
         m = max(2, int(clean_margin))
         mt = mb = ml = mr = m
     else:
-        base_m = max(6, min(30, int(min(ih, iw) * np.random.uniform(0.03, 0.14))))
-        mt = max(4, int(base_m * np.random.uniform(0.65, 1.35)))
-        mb = max(4, int(base_m * np.random.uniform(0.65, 1.35)))
-        ml = max(6, int(base_m * np.random.uniform(0.75, 1.45)))
-        mr = max(6, int(base_m * np.random.uniform(0.75, 1.45)))
+        base_m = max(8, min(30, int(min(ih, iw) * np.random.uniform(0.04, 0.14))))
+        mt = max(6, int(base_m * np.random.uniform(0.70, 1.35)))
+        mb = max(6, int(base_m * np.random.uniform(0.70, 1.35)))
+        ml = max(8, int(base_m * np.random.uniform(0.80, 1.45)))
+        mr = max(8, int(base_m * np.random.uniform(0.80, 1.45)))
     img = np.pad(img, ((mt, mb), (ml, mr), (0, 0)))
     ink_box = (ml, mt, img.shape[1] - mr, img.shape[0] - mb)
 
@@ -379,17 +388,17 @@ def render_clean_background(
         bg_bgr = (v, v, v)
     else:
         r = np.random.rand()
-        if r < 0.58:
+        if r < 0.62:
             bg_bgr = (255, 255, 255)
-        elif r < 0.86:
-            v = int(np.random.randint(240, 254))
+        elif r < 0.88:
+            v = int(np.random.randint(242, 254))
             bg_bgr = (
                 v,
                 min(255, v + int(np.random.randint(-2, 3))),
                 min(255, v + int(np.random.randint(-2, 3))),
             )
         else:
-            v = int(np.random.randint(218, 240))
+            v = int(np.random.randint(220, 242))
             bg_bgr = (v, v, v)
 
     background = np.full((img.shape[0], img.shape[1], 3), bg_bgr, dtype=np.uint8)
@@ -397,7 +406,7 @@ def render_clean_background(
         try:
             ghost = renderer._load_background(img.shape[0], img.shape[1])
             ghost = cv2.GaussianBlur(ghost, (5, 5), 0).astype(np.float32)
-            alpha_g = float(np.random.uniform(0.03, 0.11))
+            alpha_g = float(np.random.uniform(0.03, 0.10))
             background = np.clip(
                 background.astype(np.float32) * (1.0 - alpha_g) + ghost * alpha_g, 0, 255
             ).astype(np.uint8)
@@ -477,20 +486,20 @@ def make_hard_manga_background(bg0, *, screentone_fn, hatch_fn):
 def degrade_clean_page_bgr(img, *, effective_font: float, scan_model_fn):
     """Realistic digital/scanned page artifacts without destroying small multi-line text."""
     out = img
-    if np.random.rand() < 0.28:
+    if np.random.rand() < 0.25:
         h, w = out.shape[:2]
-        ang = float(np.random.uniform(-2.2, 2.2))
+        ang = float(np.random.uniform(-1.8, 1.8))
         M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
         out = cv2.warpAffine(out, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    if np.random.rand() < 0.40:
+    if np.random.rand() < 0.35:
         out = scan_model_fn(out, allow_spread=False)
-    if effective_font >= 16.0 and np.random.rand() < 0.25 and min(out.shape[:2]) >= 64:
+    if effective_font >= 16.0 and np.random.rand() < 0.22 and min(out.shape[:2]) >= 64:
         h, w = out.shape[:2]
-        s = float(np.random.uniform(0.76, 0.94))
+        s = float(np.random.uniform(0.78, 0.94))
         small = cv2.resize(out, (max(32, int(w * s)), max(32, int(h * s))), interpolation=cv2.INTER_AREA)
         out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
     if np.random.rand() < 0.65:
-        q = int(np.random.randint(40, 95))
+        q = int(np.random.randint(45, 95))
         ok, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
         if ok:
             out = cv2.imdecode(enc, cv2.IMREAD_UNCHANGED)
@@ -506,7 +515,7 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
         scale = target_short / float(min(h, w))
         nw, nh = max(34, int(round(w * scale))), max(34, int(round(h * scale)))
         if max(nw, nh) / max(1, min(nw, nh)) <= max_output_aspect:
-            interp = cv2.INTER_AREA if np.random.rand() < 0.70 else cv2.INTER_NEAREST
+            interp = cv2.INTER_AREA if np.random.rand() < 0.72 else cv2.INTER_NEAREST
             out = cv2.resize(out, (nw, nh), interpolation=interp)
 
     if not is_color and np.random.rand() < 0.45:
@@ -520,12 +529,12 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
     else:
         out = scan_model_fn(out, allow_spread=False)
 
-    if np.random.rand() < 0.30:
-        out = out.astype(np.float32) + np.random.normal(0.0, float(np.random.uniform(3.0, 11.0)), out.shape).astype(np.float32)
+    if np.random.rand() < 0.28:
+        out = out.astype(np.float32) + np.random.normal(0.0, float(np.random.uniform(3.0, 10.0)), out.shape).astype(np.float32)
         out = np.clip(out, 0, 255).astype(np.uint8)
 
     if np.random.rand() < 0.68:
-        q = int(np.random.randint(20, 62))
+        q = int(np.random.randint(22, 62))
         ok, enc = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
         if ok:
             out = cv2.imdecode(enc, cv2.IMREAD_UNCHANGED)
@@ -535,87 +544,129 @@ def degrade_raw_manga_crop_bgr(img, *, is_color: bool, max_output_aspect: float,
 # =============================================================================
 # Targeted ~100k edge-case dataset generator (called by modal/modal_app.py)
 # =============================================================================
-_JA_AFTERWORD_TEMPLATES = [
-    "ご購読まことにありがとうございました！",
-    "お手に取っていただきありがとうございます。",
-    "超ひさしぶりの本です。",
-    "久しぶりの新刊になりました。",
-    "ここまで読んでくださって感謝です！",
-    "次回もよろしくお願いします。",
-    "またイベントでお会いしましょう！",
-    "感想などいただけたら嬉しいです。",
-    "メメント杜から長谷川らくに改名したりしました。",
-    "ペンネームを少し変更しました。",
-    "もう長いことこういうキャラを愛でている気がします。",
-    "前から描きたかったネタをやっと形にできました。",
-    "そして⇧と同じくらい黒髪センターパートのキャラが好きです。",
-    "個人的には→のシーンが一番お気に入りです。",
-    "※この物語はフィクションです。",
-    "※実在の人物・団体とは一切関係ありません。",
-    "ゴムはつけましょう。",
-    "体調管理には気をつけましょう。",
-    "締切ギリギリでしたが何とか間に合いました！",
-    "アシスタントの皆様、本当にありがとうございました。",
-    "表紙デザインもすごく可愛く仕上がっています。",
-    "ページ数が予定より少し増えてしまいました。",
-    "巻末におまけページも収録しています。",
-    "誤字脱字があったらごめんなさい！",
-    "次巻の発売は来春を予定しています。",
-    "アンケートや応援メッセージいつも励みになります。",
-    "SNSのフォローもよろしくね♪",
-    "それではまた次の作品でお会いしましょう。",
-    "描き下ろしイラストもぜひチェックしてください★",
-    "設定資料は公式サイトでも公開中です。",
-    "少し駆け足になってしまった部分もありますが楽しんで頂けたら幸いです。",
-    "キャラクターの表情を描くのがとても楽しかったです。",
-    "背景のトーン作業が一番大変でした…！",
-    "これからもマイペースに更新していく予定です。",
-    "発行日：2026年11月19日 初版発行",
-    "無断転載・複製・AI学習への利用を禁じます。",
+_JA_AFTERWORD_BLOCKS = [
+    [
+        "ご購読まことにありがとうございました！",
+        "超ひさしぶりの本です。",
+        "ペンネームを少し改名したりしました。",
+        "もう長いことこういうキャラを愛でている気がします。",
+        "そして⇧と同じくらい黒髪センターパートのキャラが好きです。",
+        "体調管理には気をつけましょう。",
+    ],
+    [
+        "お手に取っていただきありがとうございます！",
+        "今回は前から描きたかったネタをやっと形にできました。",
+        "締切ギリギリでしたが何とか間に合ってよかったです。",
+        "背景のトーン作業が一番大変でした…！",
+        "感想などいただけたらすごく嬉しいです。",
+        "次回もよろしくお願いします♪",
+    ],
+    [
+        "ここまで読んでくださって感謝です！",
+        "ページ数が予定より少し増えてしまいました。",
+        "巻末におまけページも収録しています。",
+        "描き下ろしイラストもぜひチェックしてください★",
+        "それではまた次の作品でお会いしましょう。",
+    ],
+    [
+        "※この物語はフィクションです。",
+        "実在の人物・団体・事件とは一切関係ありません。",
+        "発行日：2026年11月19日 初版発行",
+        "印刷所：株式会社サンプル印刷",
+        "無断転載・複製を禁じます。",
+    ],
+    [
+        "久しぶりの新刊になりました。",
+        "表紙デザインもすごく可愛く仕上がっています。",
+        "キャラクターの表情を描くのがとても楽しかったです。",
+        "誤字脱字があったらごめんなさい！",
+        "SNSのフォローもよろしくお願いします。",
+        "またイベントでお会いしましょう！",
+    ],
+    [
+        "アンケートや応援メッセージいつも励みになります。",
+        "次巻の発売は来春を予定しています。",
+        "設定資料は公式サイトでも公開中です。",
+        "少し駆け足になってしまった部分もありますが楽しんで頂けたら幸いです。",
+        "これからもマイペースに更新していく予定です。",
+    ],
 ]
 
-_JA_INLINE_SYMBOLS = ["⇧", "⇨", "→", "←", "↑", "↓", "・", "※", "★", "☆", "♡", "♪", "〜", "…", "●", "◎"]
-
-_JA_NONSTANDARD_VOICED_HIGH = [
+_JA_NONSTANDARD_VOICED_BASES = [
     "ん", "あ", "い", "う", "え", "お",
-    "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "っ",
+    "ぁ", "ぃ", "ぅ", "ぇ", "ぉ",
     "ン", "ア", "イ", "ウ", "エ", "オ",
-    "ァ", "ィ", "ゥ", "ェ", "ォ", "ッ",
 ]
-_JA_NONSTANDARD_VOICED_EXTRA = [
-    "な", "に", "ぬ", "ね", "の", "ま", "み", "む", "め", "も",
-    "や", "ゆ", "よ", "ら", "り", "る", "れ", "ろ", "わ", "ー",
-    "ナ", "ニ", "ヌ", "ネ", "ノ", "マ", "ミ", "ム", "メ", "モ",
-    "ヤ", "ユ", "ヨ", "ラ", "リ", "ル", "レ", "ロ", "ワ",
-]
-_JA_STANDARD_VOICED_HIRA = list("がぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽゔ")
-_JA_STANDARD_VOICED_KATA = list("ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ")
-_JA_CONFUSION_PAIRS = [
-    "ばぱは", "びぴひ", "ぶぷふ", "べぺへ", "ぼぽほ",
-    "がっか", "ぎっき", "ぐっく", "だたった", "どっと", "ずっす",
-    "バパハ", "ビピヒ", "ブプフ", "ガッカ", "ダタッ", "ヴウッ", "ゔうっ",
-]
-_JA_TRAIL_SMALL = ["ッ", "っ", "ぃ", "ぁ", "ぅ", "ぇ", "ぉ", "ィ", "ァ", "ゥ", "ェ", "ォ", "い", "あ", "ん", "ー"]
+_JA_TRAIL_KANA_HIRA = ["っ", "ッ", "い", "ぃ", "ぁ", "ぅ", "ぇ", "ぉ", "あ", "ん", "ー"]
+_JA_TRAIL_KANA_KATA = ["ッ", "ァ", "ィ", "ゥ", "ェ", "ォ", "ア", "ン", "ー"]
 _JA_END_PUNCT = ["", "", "", "！", "っ", "ッ", "…", "♡", "？", "！？", "っ！", "ッ！"]
+
+# Authentic manga vocalizations / moans / shouts with non-standard dakuten
 _JA_DAKUTEN_WORDS = [
     "ん{d}ッい", "ん{d}っぃ", "ん{d}っ", "ん{d}ッ", "ん{d}ぁ", "ん{d}あ{d}",
-    "ん{d}ん{d}", "ん{d}ぐ{d}っ", "ん{d}ふ{d}っ", "ん{d}ぅ{d}",
+    "ん{d}ん{d}", "ん{d}ん{d}っ", "ん{d}ぐっ", "ん{d}ふっ", "ん{d}ぅっ",
+    "ん{d}ーっ", "ん{d}ーっ！", "ん{d}っ♡", "ん{d}ぉっ", "ん{d}あっ",
     "あ{d}ッ", "あ{d}っ", "あ{d}ぁ{d}", "あ{d}あ{d}っ", "あ{d}あ{d}あ{d}っ！",
-    "い{d}っ", "い{d}ぃ{d}", "い{d}た{d}い{d}っ", "う{d}っ", "う{d}ぁ{d}っ",
-    "え{d}っ", "お{d}っ", "お{d}ぉ{d}っ", "ぁ{d}っ", "ぃ{d}っ", "ぅ{d}っ",
-    "ン{d}ッ", "ア{d}ッ", "ア{d}ア{d}ア{d}ッ", "イ{d}ッ", "ウ{d}ッ", "エ{d}ッ", "オ{d}ッ",
-    "や{d}め{d}て{d}っ", "ぐ{d}っ", "ぎ{d}ゃ{d}あ{d}", "ご{d}ほ{d}っ", "が{d}は{d}っ",
+    "い{d}っ", "い{d}ぃ{d}", "い{d}た{d}い{d}っ", "い{d}や{d}っ",
+    "う{d}っ", "う{d}ぁ{d}っ", "う{d}ぐっ", "え{d}っ", "お{d}っ", "お{d}ぉ{d}っ",
+    "ぁ{d}っ", "ぃ{d}っ", "ぅ{d}っ", "ぇ{d}っ", "ぉ{d}っ",
+    "ン{d}ッ", "ン{d}ン{d}ッ", "ア{d}ッ", "ア{d}ア{d}ッ！", "イ{d}ッ", "ウ{d}ッ", "エ{d}ッ", "オ{d}ッ",
+    "や{d}め{d}て{d}っ", "な{d}ん{d}で{d}っ", "ぐ{d}っ", "ぎ{d}ゃ{d}あ{d}", "ご{d}ほ{d}っ", "が{d}は{d}っ",
     "んっ…ん{d}っ", "ああ{d}っ", "ん{d}っい", "ん{d}ッぃ", "あっ…あ{d}ぁっ",
-    "はぁっ…ん{d}っ", "ん{d}っ…い{d}っ", "ん{d}ぉ{d}っ♡",
+    "はぁっ…ん{d}っ", "ん{d}っ…い{d}っ", "♡お{d}おぉっ！", "♡ん{d}っ…！",
 ]
-_JA_STANDARD_VOICED_SFX = [
+
+# Real Japanese voiced/semi-voiced manga words & SFX (no gibberish!)
+_JA_REAL_VOICED_WORDS = [
     "ガッ", "ゴッ", "ドッ", "バキッ", "ボコッ", "ズバァッ", "グサッ", "ドゴォッ",
     "ビリッ", "ザワッ", "ゾクッ", "ギロッ", "ベチャッ", "ギュッ", "ブワッ", "パキッ",
     "ポキッ", "ピキッ", "ガタッ", "ゴゴゴ", "ドドド", "ダダダ", "バタバタ", "ズキズキ",
     "パァンッ", "バンッ", "ボンッ", "ポンッ", "ピシャッ", "ビシャッ", "プツッ", "ブツッ",
-    "ぐっ", "ごほっ", "だめっ", "ばかっ", "びくっ", "どきっ", "ぞくっ", "ぷるっ",
-    "ぎゅっ", "ぶわっ", "べたっ", "じわっ", "がたっ", "ぱっ", "ぽっ", "ゔっ", "ヴッ",
+    "ドクン", "ビクッ", "ピクッ", "ボロボロ", "ベタベタ", "ビクビク", "ドキドキ", "ゾクゾク",
+    "プルプル", "ポタポタ", "パチッ", "バチッ", "ブチッ", "プチッ", "ズドン", "ドカン",
+    "ぐっ", "ごほっ", "だめっ", "ばかっ", "びくっ", "ぴくっ", "どきっ", "ぞくっ", "ぷるっ",
+    "ぎゅっ", "ぶわっ", "べたっ", "じわっ", "がたっ", "ぱっ", "ぽっ", "ぶっ", "ぷっ",
+    "ごめんっ", "やばっ", "まじで", "ぜんぶ", "だよね", "ばか！", "だめ！", "ぶっ！",
+    "ゔっ", "ヴッ", "ゔぁっ", "ヴぁっ", "ばぱっ", "ぱばっ", "びぴっ", "ぶぷっ",
 ]
+
+_RE_OPEN_TO_CLOSE = {"「": "」", "『": "』", "（": "）", "(": ")"}
+_RE_CLOSE_TO_OPEN = {v: k for k, v in _RE_OPEN_TO_CLOSE.items()}
+_RE_HAS_KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
+_RE_HAS_JP = re.compile(r"[\u3041-\u3096\u30a1-\u30fa\u4e00-\u9fff]")
+
+
+def _balance_brackets(s: str) -> str:
+    if not any(ch in s for ch in "「」『』（）()"):
+        return s
+    stack: list[int] = []
+    drop: set[int] = set()
+    for i, ch in enumerate(s):
+        if ch in _RE_OPEN_TO_CLOSE:
+            stack.append(i)
+        elif ch in _RE_CLOSE_TO_OPEN:
+            if stack and s[stack[-1]] == _RE_CLOSE_TO_OPEN[ch]:
+                stack.pop()
+            else:
+                drop.add(i)
+    drop.update(stack)
+    if not drop:
+        return s
+    return "".join(ch for i, ch in enumerate(s) if i not in drop)
+
+
+def _clean_jp_line(raw: str) -> str:
+    s = raw.strip().strip("\u3000").replace("\t", " ")
+    s = re.sub(r"\.{2,}|。{2,}", "…", s)
+    s = re.sub(r"[~～]{2,}", "〜", s)
+    s = s.replace("~", "〜")
+    s = _balance_brackets(s).strip()
+    # Strip outer quotes if the entire line is wrapped in them
+    if len(s) >= 4 and s[0] in ("「", "『") and s[-1] == _RE_OPEN_TO_CLOSE[s[0]]:
+        inner = s[1:-1].strip()
+        if inner and _balance_brackets(inner) == inner:
+            s = inner
+    return s
 
 
 def import_repo_normalizer():
@@ -649,14 +700,53 @@ def import_repo_normalizer():
     return _fallback_normalize
 
 
+def _wrap_passage_to_lines(text: str, min_len: int = 6, max_len: int = 34) -> list[str]:
+    """Split a coherent Japanese passage into clean complete sentences/clauses (never mid-word)."""
+    aozora_ruby = re.compile(r"｜?([^《\r\n]+)《[^》\r\n]+》")
+    aozora_notes = re.compile(r"［＃[^］\r\n]+］")
+    sent_split = re.compile(r"(?<=[。！？!?])")
+    text = aozora_notes.sub("", aozora_ruby.sub(r"\1", text))
+
+    out: list[str] = []
+    for raw_para in text.splitlines():
+        para = _clean_jp_line(raw_para)
+        if not para or "http" in para or "==" in para or len(para) < min_len:
+            continue
+        if not _RE_HAS_KANA.search(para):
+            continue
+        if len(para) <= max_len:
+            out.append(para)
+            continue
+        for sent in sent_split.split(para):
+            sent = _clean_jp_line(sent)
+            if not sent or len(sent) < min_len or not _RE_HAS_KANA.search(sent):
+                continue
+            if len(sent) <= max_len:
+                out.append(sent)
+            else:
+                # Split only on Japanese comma '、' if possible; otherwise skip rather than chop mid-word
+                buf = ""
+                for part in re.split(r"(?<=、)", sent):
+                    if buf and len(buf) + len(part) > max_len:
+                        if len(buf) >= min_len:
+                            out.append(buf)
+                        buf = part
+                    else:
+                        buf += part
+                if min_len <= len(buf) <= max_len:
+                    out.append(buf)
+    return out
+
+
 def load_ja_corpora(
     cache_dir: Path,
     *,
-    limit: int = 250_000,
+    limit_blocks: int = 45_000,
     lines_path: str = "",
     commit_fn=None,
-) -> tuple[list[str], list[str]]:
-    """Return (paragraph_sentences, real_dakuten_lines) harvested from novels & dialogue."""
+) -> tuple[list[list[str]], list[str]]:
+    """Return (coherent_paragraph_blocks, real_dakuten_lines) harvested from novels & dialogue."""
+    import json
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -665,128 +755,165 @@ def load_ja_corpora(
         if p.suffix == ".parquet":
             tbl = pq.read_table(p)
             col = "line" if "line" in tbl.column_names else tbl.column_names[0]
-            rows = [str(x).strip() for x in tbl[col].to_pylist() if x and 4 <= len(str(x).strip()) <= 45]
+            rows = [_clean_jp_line(str(x)) for x in tbl[col].to_pylist() if x]
         else:
-            rows = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if 4 <= len(ln.strip()) <= 45]
-        if rows:
-            print(f"Loaded {len(rows):,} sentences from local lines_path={p}")
-            return rows, []
+            rows = [_clean_jp_line(ln) for ln in p.read_text(encoding="utf-8").splitlines()]
+        rows = [r for r in rows if 6 <= len(r) <= 34 and _RE_HAS_KANA.search(r)]
+        blocks = [rows[i : i + 6] for i in range(0, len(rows) - 5, 6)]
+        if blocks:
+            print(f"Loaded {len(blocks):,} paragraph blocks from local lines_path={p}")
+            return blocks, []
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    sent_file = cache_dir / "ja_edgecase_sentences_v2.parquet"
-    dak_file = cache_dir / "ja_edgecase_dakuten_v2.parquet"
-    if sent_file.is_file():
-        rows = [str(x) for x in pq.read_table(sent_file)["line"].to_pylist() if x]
+    blk_file = cache_dir / "ja_edgecase_blocks_v3.parquet"
+    dak_file = cache_dir / "ja_edgecase_dakuten_v3.parquet"
+    if blk_file.is_file():
+        raw_blks = pq.read_table(blk_file)["lines_json"].to_pylist()
+        blocks = [json.loads(x) for x in raw_blks if x]
         d_rows = [str(x) for x in pq.read_table(dak_file)["line"].to_pylist() if x] if dak_file.is_file() else []
-        if len(rows) >= 5_000:
-            print(f"Reusing cached corpora: {len(rows):,} sentences, {len(d_rows):,} real dakuten lines")
-            return rows, d_rows
+        if len(blocks) >= 2_000:
+            print(f"Reusing cached coherent corpora (v3): {len(blocks):,} blocks, {len(d_rows):,} real dakuten lines")
+            return blocks, d_rows
 
-    sentences: list[str] = []
+    blocks: list[list[str]] = []
     real_dakuten: list[str] = []
-    sent_split_re = re.compile(r"(?<=[。！？!?\n])")
-    ja_re = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
-    aozora_ruby = re.compile(r"｜?([^《\r\n]+)《[^》\r\n]+》")
-    aozora_notes = re.compile(r"［＃[^］\r\n]+］")
-    nonstd_dak_re = re.compile(r"[んあいうえおぁぃぅぇぉっンアイウエオァィゥェォッ][゛\u3099ﾞ゜\u309a]")
+    nonstd_dak_re = re.compile(r"[んあいうえおぁぃぅぇぉンアイウエオ][゛\u3099ﾞ]")
 
-    def _harvest(raw_text: str, cap: int) -> None:
+    def _harvest_block(raw_text: str, cap: int) -> None:
         if not raw_text:
             return
-        cleaned = aozora_notes.sub("", aozora_ruby.sub(r"\1", raw_text))
-        for raw in sent_split_re.split(cleaned):
-            s = raw.strip().strip("\u3000「」『』").replace("\t", " ")
-            if not s or "http" in s or "==" in s:
-                continue
-            if 2 <= len(s) <= 16 and len(real_dakuten) < 40_000 and nonstd_dak_re.search(s):
-                real_dakuten.append(s)
-            if len(sentences) < cap and 5 <= len(s) <= 38 and ja_re.search(s):
-                sentences.append(s)
+        lines = _wrap_passage_to_lines(raw_text, min_len=6, max_len=34)
+        for ln in lines:
+            if (
+                2 <= len(ln) <= 10
+                and len(real_dakuten) < 35_000
+                and nonstd_dak_re.search(ln)
+                and not re.search(r"[A-Za-z0-9~]", ln)
+            ):
+                real_dakuten.append(ln)
+        if len(blocks) >= cap or len(lines) < 3:
+            return
+        # Slice coherent windows of 3..9 consecutive lines from the SAME passage
+        idx = 0
+        while idx + 3 <= len(lines) and len(blocks) < cap:
+            win = min(len(lines) - idx, 9)
+            blocks.append(lines[idx : idx + win])
+            idx += max(3, win // 2)
 
-    # Tier 1: OmniAICreator/Japanese-Novels-23M (afterwords + NSFW/SFW web novels)
+    # Tier 1: OmniAICreator/Japanese-Novels-23M (real afterwords + coherent prose + NSFW dakuten)
     try:
         from datasets import load_dataset
 
-        novel_cap = int(limit * 0.62)
+        novel_cap = int(limit_blocks * 0.78)
         configs = ("Narou_NSFW", "Kakuyomu", "Narou_SFW", "pixiv", "Hameln")
-        per_cfg = max(5_000, novel_cap // len(configs))
+        per_cfg = max(2_000, novel_cap // len(configs))
         for cfg in configs:
-            target = min(novel_cap, len(sentences) + per_cfg)
+            target = min(novel_cap, len(blocks) + per_cfg)
             try:
-                print(f"Streaming Japanese-Novels-23M ({cfg}) [afterwords + prose + dakuten]...")
+                print(f"Streaming Japanese-Novels-23M ({cfg}) [coherent afterwords + prose + dakuten]...")
                 ds = load_dataset("OmniAICreator/Japanese-Novels-23M", cfg, split="train", streaming=True)
                 for row in ds:
                     for field in ("afterword", "atogaki", "preface", "maegaki", "synopsis"):
                         val = row.get(field)
                         if isinstance(val, str) and val:
-                            _harvest(val, target)
+                            _harvest_block(val, target)
                     body = row.get("main_text") or row.get("text")
                     if isinstance(body, str) and body:
-                        _harvest(body[:2200], target)
-                    if len(sentences) >= target:
+                        _harvest_block(body[:2500], target)
+                    if len(blocks) >= target:
                         break
             except Exception as exc:
                 print(f"Japanese-Novels-23M ({cfg}) notice: {exc}")
-        print(f"Collected {len(sentences):,} novel lines & {len(real_dakuten):,} real dakuten lines.")
+        print(f"Collected {len(blocks):,} coherent novel/afterword blocks & {len(real_dakuten):,} real dakuten lines.")
     except Exception as exc:
         print(f"Japanese-Novels-23M streaming notice: {exc}")
 
-    # Tier 2: JustANormalTinkerer/Japanese-Dialogue-Dataset
+    # Tier 2: JustANormalTinkerer/Japanese-Dialogue-Dataset (consecutive subtitle lines from same episode!)
     try:
         from datasets import load_dataset
 
         print("Streaming JustANormalTinkerer/Japanese-Dialogue-Dataset...")
         for sp in ("anime_tv", "anime_movie", "drama_tv"):
-            if len(sentences) >= limit:
+            if len(blocks) >= limit_blocks:
                 break
             try:
                 ds = load_dataset("JustANormalTinkerer/Japanese-Dialogue-Dataset", split=sp, streaming=True)
+                cur_file = None
+                buf: list[str] = []
                 for row in ds:
-                    val = row.get("dialogue") or row.get("text") or ""
-                    if isinstance(val, str):
-                        _harvest(val, limit)
-                    if len(sentences) >= limit:
+                    sf = row.get("source_file") or sp
+                    val = _clean_jp_line(str(row.get("dialogue") or row.get("text") or ""))
+                    if sf != cur_file:
+                        if len(buf) >= 4:
+                            blocks.append(buf[:9])
+                        cur_file = sf
+                        buf = []
+                    if 6 <= len(val) <= 32 and _RE_HAS_KANA.search(val):
+                        buf.append(val)
+                        if len(buf) >= 8:
+                            blocks.append(buf)
+                            buf = []
+                    if len(blocks) >= limit_blocks:
                         break
             except Exception as exc:
                 print(f"Japanese-Dialogue-Dataset ({sp}) notice: {exc}")
-        print(f"Total sentences after dialogue dataset: {len(sentences):,}")
+        print(f"Total coherent blocks after dialogue dataset: {len(blocks):,}")
     except Exception as exc:
         print(f"Japanese-Dialogue-Dataset streaming notice: {exc}")
 
-    # Tier 3: Wikipedia fallback
-    if len(sentences) < 5_000:
-        try:
-            from datasets import load_dataset
+    # Always include built-in afterword blocks
+    blocks.extend(_JA_AFTERWORD_BLOCKS * 40)
 
-            print("Streaming fallback sentences from wikimedia/wikipedia (20231101.ja)...")
-            ds = load_dataset("wikimedia/wikipedia", "20231101.ja", split="train", streaming=True)
-            for item in ds:
-                _harvest(item.get("text") or "", limit)
-                if len(sentences) >= limit:
-                    break
-        except Exception as exc:
-            print(f"Wikipedia ja fallback notice: {exc}")
-
-    sentences.extend(_JA_AFTERWORD_TEMPLATES * 25)
-    if sentences:
-        tmp_f = sent_file.with_suffix(".parquet.tmp")
-        pq.write_table(pa.table({"line": sentences}), tmp_f)
-        os.replace(tmp_f, sent_file)
+    if blocks:
+        tmp_f = blk_file.with_suffix(".parquet.tmp")
+        pq.write_table(pa.table({"lines_json": [json.dumps(b, ensure_ascii=False) for b in blocks]}), tmp_f)
+        os.replace(tmp_f, blk_file)
     if real_dakuten:
         tmp_d = dak_file.with_suffix(".parquet.tmp")
         pq.write_table(pa.table({"line": real_dakuten}), tmp_d)
         os.replace(tmp_d, dak_file)
     if commit_fn is not None:
         commit_fn()
-    return sentences, real_dakuten
+    return blocks, real_dakuten
 
 
 def categorize_ja_fonts(fonts_root: Path) -> tuple[list[str], list[str], list[str]]:
-    """Return (all_fonts, clean_paragraph_fonts, expressive_dakuten_fonts)."""
+    """Filter & categorize Japanese fonts strictly by glyph coverage (no Chinese-only or kana-only bugs!)."""
+    from manga_ocr_dev.synthetic_data_generator.utils import is_drawable
+
     exts = {".ttf", ".otf", ".ttc"}
-    all_fonts = sorted(str(p) for p in fonts_root.rglob("*") if p.is_file() and p.suffix.lower() in exts)
-    if not all_fonts:
+    raw_fonts = sorted(str(p) for p in fonts_root.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+    if not raw_fonts:
         raise RuntimeError(f"No font files found under {fonts_root}")
+
+    kana_probe = "あいうえおんをっゃぁぃぅぇぉアイウエオンッャー、。！？"
+    kanji_probe = "私人間本日語愛好き気長文字前後上下大小中見思行来"
+
+    kana_capable: list[str] = []
+    full_jp_fonts: list[str] = []
+    for f in raw_fonts:
+        # Never use Chinese_Additions for Japanese unless it truly supports full JP kana + kanji
+        in_cn_folder = "chinese_additions" in f.lower()
+        try:
+            has_kana = all(is_drawable(f, ch) for ch in kana_probe)
+        except Exception:
+            has_kana = False
+        if not has_kana:
+            continue
+        kana_capable.append(f)
+        if in_cn_folder:
+            continue
+        try:
+            has_kanji = all(is_drawable(f, ch) for ch in kanji_probe)
+        except Exception:
+            has_kanji = False
+        if has_kanji:
+            full_jp_fonts.append(f)
+
+    if not kana_capable:
+        kana_capable = raw_fonts
+    if not full_jp_fonts:
+        full_jp_fonts = kana_capable
 
     expressive_kw = (
         "brush", "fude", "tegaki", "hand", "bold", "heavy", "black", "pop", "comic",
@@ -798,12 +925,16 @@ def categorize_ja_fonts(fonts_root: Path) -> tuple[list[str], list[str], list[st
         "hiragino", "mplus", "rounded", "regular", "medium", "book", "normal",
         "gen", "source", "ipag", "ipam", "sawarabi", "kosugi", "zen", "biz",
     )
-    expressive = [f for f in all_fonts if any(k in Path(f).name.lower() for k in expressive_kw)]
-    clean = [f for f in all_fonts if any(k in Path(f).name.lower() for k in clean_kw)]
-    return all_fonts, (clean if len(clean) >= 3 else all_fonts), (expressive if len(expressive) >= 3 else all_fonts)
+    expressive = [f for f in kana_capable if any(k in Path(f).name.lower() for k in expressive_kw)]
+    clean = [f for f in full_jp_fonts if any(k in Path(f).name.lower() for k in clean_kw)]
+    return (
+        full_jp_fonts,
+        (clean if len(clean) >= 3 else full_jp_fonts),
+        (expressive if len(expressive) >= 3 else kana_capable),
+    )
 
 
-def detect_line_join(repo_dir: Path, language: str, line_join: str) -> str:
+def detect_line_join(repo_dir: Path, language: str, line_join: str, bg_dir: Path | None = None) -> str:
     if line_join == "none":
         return ""
     if line_join == "newline":
@@ -812,60 +943,57 @@ def detect_line_join(repo_dir: Path, language: str, line_join: str) -> str:
         return " "
     if line_join != "auto":
         return line_join
-    gen_file = repo_dir / "manga_ocr_dev" / "synthetic_data_generator" / "generator.py"
-    if gen_file.is_file():
-        src = gen_file.read_text(encoding="utf-8", errors="ignore")
-        if '"\\n".join' in src or "'\\n'.join" in src:
-            return "\n"
+    # Probe actual SyntheticDataGenerator output rather than grepping source code
+    try:
+        from manga_ocr_dev.synthetic_data_generator.generator import SyntheticDataGenerator
+        from manga_ocr_dev.synthetic_data_generator.utils import get_background_df
+
+        gen = SyntheticDataGenerator(background_df=get_background_df(bg_dir) if bg_dir else None)
+        for _ in range(8):
+            _, txt, _ = gen.process(text=None, sfx=False, lang=language)
+            if isinstance(txt, str) and "\n" in txt:
+                return "\n"
+    except Exception:
+        pass
     return " " if language in ("en", "ko") else ""
 
 
-def build_clean_paragraph(rng, sentences: list[str], font_path: str, is_drawable_fn) -> tuple[list[str], dict]:
-    n_lines = int(rng.choice([3, 4, 5, 6, 7, 8, 9, 10, 11], p=[0.06, 0.12, 0.18, 0.20, 0.16, 0.12, 0.08, 0.05, 0.03]))
-    use_afterword_bias = rng.random() < 0.30
-    repeat_ending = rng.choice(["です。", "ます。", "ました。", "ですね。", "ましょう。", "でした。"]) if rng.random() < 0.20 else None
-    list_style = str(rng.choice(["none", "bullet", "numbered", "indented"], p=[0.76, 0.10, 0.07, 0.07]))
+def build_clean_paragraph(rng, blocks: list[list[str]], font_path: str, is_drawable_fn) -> tuple[list[str], dict]:
+    # Choose a coherent multi-line block (never mix random unrelated sentences or strip characters!)
+    if rng.random() < 0.22:
+        src_block = list(_JA_AFTERWORD_BLOCKS[int(rng.integers(0, len(_JA_AFTERWORD_BLOCKS)))])
+    else:
+        src_block = list(blocks[int(rng.integers(0, len(blocks)))])
 
-    lines: list[str] = []
-    for li in range(n_lines):
-        if use_afterword_bias and rng.random() < 0.50:
-            s = str(_JA_AFTERWORD_TEMPLATES[int(rng.integers(0, len(_JA_AFTERWORD_TEMPLATES)))])
-        else:
-            s = str(sentences[int(rng.integers(0, len(sentences)))])
-        roll_len = rng.random()
-        if roll_len < 0.22 and len(s) > 13:
-            cut = int(rng.integers(6, min(len(s), 15)))
-            s = s[:cut].rstrip("、, ") + str(rng.choice(["。", "！", "？", ""]))
-        elif roll_len < 0.48 and len(s) < 22:
-            s2 = str(sentences[int(rng.integers(0, len(sentences)))])
-            s = (s + s2)[: int(rng.integers(22, 38))]
-        if repeat_ending and rng.random() < 0.50 and len(s) >= 6:
-            s = s.rstrip("。！？!? ") + str(repeat_ending)
-        if list_style == "bullet" and rng.random() < 0.85:
-            s = "・" + s
-        elif list_style == "numbered":
-            s = f"{li + 1}.{s}"
-        elif list_style == "indented" and li == 0 and is_drawable_fn(font_path, "\u3000"):
-            s = "\u3000" + s
-        s = "".join(ch for ch in s if is_drawable_fn(font_path, ch))
-        if len(s) < 3:
-            s = "".join(ch for ch in "ありがとうございます。" if is_drawable_fn(font_path, ch))
-        lines.append(s)
-
-    if rng.random() < 0.35 and lines:
-        drawable_syms = [sym for sym in _JA_INLINE_SYMBOLS if is_drawable_fn(font_path, sym)]
-        if drawable_syms:
-            for _ in range(int(rng.choice([1, 1, 2]))):
-                sym = str(drawable_syms[int(rng.integers(0, len(drawable_syms)))])
-                li = int(rng.integers(0, len(lines)))
-                ln = lines[li]
-                if len(ln) >= 4:
-                    pos = int(rng.integers(2, len(ln) - 1))
-                    lines[li] = ln[:pos] + sym + ln[pos:]
+    want_n = int(rng.choice([3, 4, 5, 6, 7, 8, 9], p=[0.08, 0.16, 0.22, 0.24, 0.14, 0.10, 0.06]))
+    if len(src_block) > want_n:
+        start = int(rng.integers(0, len(src_block) - want_n + 1))
+        lines = src_block[start : start + want_n]
+    else:
+        lines = src_block
 
     vertical = bool(rng.random() < 0.08)
+
+    # Bullet / numbered list prefixes ONLY on horizontal paragraphs (never sideways in vertical!)
+    if not vertical:
+        list_style = str(rng.choice(["none", "bullet", "numbered", "indented"], p=[0.80, 0.08, 0.06, 0.06]))
+        if list_style == "bullet":
+            lines = ["・" + ln for ln in lines]
+        elif list_style == "numbered":
+            lines = [f"{i + 1}. {ln}" for i, ln in enumerate(lines)]
+        elif list_style == "indented" and lines and is_drawable_fn(font_path, "\u3000"):
+            lines = ["\u3000" + lines[0], *lines[1:]]
+
+    # Strict drawability guarantee: NEVER strip characters! Verify every char is drawable in font_path.
+    for ln in lines:
+        if len(ln) < 3 or not _RE_HAS_JP.search(ln):
+            raise ValueError("short/non-jp line")
+        for ch in ln:
+            if not is_drawable_fn(font_path, ch):
+                raise ValueError(f"font cannot draw {ch!r}")
+
     max_len = max(len(ln) for ln in lines)
-    font_size = int(rng.integers(22, 38)) if max_len >= 24 else int(rng.integers(26, 46))
+    font_size = int(rng.integers(22, 36)) if max_len >= 24 else int(rng.integers(26, 44))
 
     bg_roll = float(rng.random())
     on_busy_art = bg_roll > 0.90
@@ -876,7 +1004,7 @@ def build_clean_paragraph(rng, sentences: list[str], font_path: str, is_drawable
         bg_val = int(rng.integers(8, 36))
         bg_color = (bg_val, bg_val, bg_val)
     else:
-        ink_v = int(rng.integers(0, 62)) if rng.random() < 0.45 else 0
+        ink_v = int(rng.integers(0, 58)) if rng.random() < 0.42 else 0
         text_color = f"#{ink_v:02x}{ink_v:02x}{ink_v:02x}"
         bg_color = None
 
@@ -885,9 +1013,9 @@ def build_clean_paragraph(rng, sentences: list[str], font_path: str, is_drawable
         "font_path": font_path,
         "font_size": font_size,
         "vertical": vertical,
-        "line_height": float(rng.uniform(0.10, 0.44)),
-        "letter_spacing": float(rng.uniform(-0.03, 0.06)),
-        "text_align": str(rng.choice(["left", "center", "right"], p=[0.78, 0.16, 0.06])),
+        "line_height": float(rng.uniform(0.14, 0.44)),
+        "letter_spacing": float(rng.uniform(-0.02, 0.05)),
+        "text_align": str(rng.choice(["left", "center", "right"], p=[0.80, 0.15, 0.05])),
         "text_color": text_color,
         "color_mode": "solid",
         "stroke_size": int(rng.choice([3, 4])) if on_busy_art else 0,
@@ -908,81 +1036,82 @@ def build_clean_paragraph(rng, sentences: list[str], font_path: str, is_drawable
     return lines, params
 
 
-def build_dakuten_sample(rng, font_path: str, dakuten_char: str, is_drawable_fn, real_dakuten: list[str] | None = None) -> tuple[list[str], dict]:
+def build_dakuten_sample(
+    rng,
+    font_path: str,
+    dakuten_char: str,
+    is_drawable_fn,
+    real_dakuten: list[str] | None = None,
+) -> tuple[list[str], dict]:
     d = dakuten_char
-    p_mark = "\u309a" if d == "\u3099" else "゜"
     r = float(rng.random())
 
-    if real_dakuten and r < 0.20:
-        # Authentic human-written dakuten vocalizations harvested from Narou_NSFW / pixiv
-        raw = str(real_dakuten[int(rng.integers(0, len(real_dakuten)))])
+    if real_dakuten and r < 0.22:
+        raw = _clean_jp_line(str(real_dakuten[int(rng.integers(0, len(real_dakuten)))]))
+        # Normalize any voicing mark to d
+        raw = re.sub(r"[゛\u3099ﾞ]", d, raw)
         lines = [raw]
-    elif r < 0.52:
-        # Short tight expressive non-standard dakuten (exact Image 2 style!)
-        if rng.random() < 0.45:
+    elif r < 0.62:
+        # Short punchy expressive non-standard dakuten (exact Image 2 archetype!)
+        if rng.random() < 0.60:
             word = str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d)
         else:
-            lead_pool = _JA_NONSTANDARD_VOICED_HIGH if rng.random() < 0.85 else _JA_NONSTANDARD_VOICED_EXTRA
-            lead = str(lead_pool[int(rng.integers(0, len(lead_pool)))])
-            mark = p_mark if rng.random() < 0.07 else d
-            n_tail = int(rng.choice([1, 2, 3, 4], p=[0.24, 0.40, 0.26, 0.10]))
-            pieces = [lead + mark]
+            lead = str(_JA_NONSTANDARD_VOICED_BASES[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_BASES)))])
+            is_kata = ord(lead) >= 0x30A0
+            trail_pool = _JA_TRAIL_KANA_KATA if is_kata else _JA_TRAIL_KANA_HIRA
+            n_tail = int(rng.choice([1, 2, 3], p=[0.28, 0.46, 0.26]))
+            pieces = [lead + d]
             for _ in range(n_tail):
-                if rng.random() < 0.28:
-                    ch2 = str(_JA_NONSTANDARD_VOICED_HIGH[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_HIGH)))])
-                    pieces.append(ch2 + (d if rng.random() < 0.50 else ""))
+                if rng.random() < 0.22:
+                    ch2 = str(_JA_NONSTANDARD_VOICED_BASES[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_BASES)))])
+                    pieces.append(ch2 + (d if rng.random() < 0.45 else ""))
                 else:
-                    pieces.append(str(_JA_TRAIL_SMALL[int(rng.integers(0, len(_JA_TRAIL_SMALL)))]))
+                    pieces.append(str(trail_pool[int(rng.integers(0, len(trail_pool)))]))
             word = "".join(pieces) + str(_JA_END_PUNCT[int(rng.integers(0, len(_JA_END_PUNCT)))])
         lines = [word]
-        if rng.random() < 0.24:
-            extra = str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d)
-            lines.append(extra[: max(2, int(rng.integers(2, len(extra) + 1)))])
-    elif r < 0.74:
-        n_lines = int(rng.choice([1, 2, 3], p=[0.48, 0.36, 0.16]))
-        lines = []
-        for _ in range(n_lines):
-            parts = []
-            for _ in range(int(rng.integers(2, 5))):
-                if rng.random() < 0.65:
-                    parts.append(str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d))
-                else:
-                    c = str(_JA_NONSTANDARD_VOICED_HIGH[int(rng.integers(0, len(_JA_NONSTANDARD_VOICED_HIGH)))])
-                    parts.append(c + (d if rng.random() < 0.55 else ""))
-            lines.append("".join(parts)[: int(rng.integers(4, 12))])
-    elif r < 0.87:
-        if rng.random() < 0.60:
-            lines = [str(_JA_STANDARD_VOICED_SFX[int(rng.integers(0, len(_JA_STANDARD_VOICED_SFX)))])]
-            if rng.random() < 0.25:
-                lines.append(str(_JA_STANDARD_VOICED_SFX[int(rng.integers(0, len(_JA_STANDARD_VOICED_SFX)))]))
-        else:
-            pool = _JA_STANDARD_VOICED_HIRA if rng.random() < 0.55 else _JA_STANDARD_VOICED_KATA
-            ln = "".join(str(pool[int(rng.integers(0, len(pool)))]) for _ in range(int(rng.integers(2, 6))))
-            lines = [ln + str(_JA_TRAIL_SMALL[int(rng.integers(0, len(_JA_TRAIL_SMALL)))])]
+        if rng.random() < 0.22 and len(word) <= 6:
+            w2 = str(_JA_DAKUTEN_WORDS[int(rng.integers(0, len(_JA_DAKUTEN_WORDS)))]).format(d=d)
+            if len(w2) <= 7:
+                lines.append(w2)
     else:
-        pair = str(_JA_CONFUSION_PAIRS[int(rng.integers(0, len(_JA_CONFUSION_PAIRS)))])
-        if rng.random() < 0.45:
-            pair += str(_JA_TRAIL_SMALL[int(rng.integers(0, len(_JA_TRAIL_SMALL)))])
-        lines = [pair]
+        # Real Japanese voiced/semi-voiced manga words & SFX (no gibberish!)
+        w1 = str(_JA_REAL_VOICED_WORDS[int(rng.integers(0, len(_JA_REAL_VOICED_WORDS)))])
+        lines = [w1]
+        if rng.random() < 0.22:
+            lines.append(str(_JA_REAL_VOICED_WORDS[int(rng.integers(0, len(_JA_REAL_VOICED_WORDS)))]))
 
-    clean_lines = []
+    # Keep vertical columns punchy (never ultra-skinny 15-char needles!)
+    max_col_clusters = max(len(split_graphemes_with_voicing(ln)) for ln in lines)
+    if max_col_clusters > 7:
+        # Split long utterance cleanly into 2 short lines or render horizontally
+        if len(lines) == 1 and rng.random() < 0.55:
+            cls = split_graphemes_with_voicing(lines[0])
+            mid = len(cls) // 2
+            lines = ["".join(cls[:mid]), "".join(cls[mid:])]
+            vertical = True
+        else:
+            vertical = False
+    else:
+        vertical = bool(rng.random() < 0.78)
+
+    # Strict drawability check (never silently drop chars)
     for ln in lines:
-        s = "".join(ch for ch in ln if ch in VOICING_MARKS or is_drawable_fn(font_path, ch))
-        if s:
-            clean_lines.append(s)
-    if not clean_lines:
-        clean_lines = [f"ん{d}ッい"]
+        if not ln:
+            raise ValueError("empty line")
+        for ch in ln:
+            if ch not in VOICING_MARKS and not is_drawable_fn(font_path, ch):
+                raise ValueError(f"font cannot draw {ch!r}")
 
-    vertical = bool(rng.random() < 0.80)
     style_roll = float(rng.random())
     draw_bubble = style_roll > 0.86
     use_sfx = (not draw_bubble) and (style_roll < 0.36)
     use_irregular = (not draw_bubble) and (not use_sfx)
 
-    font_size = int(rng.integers(52, 124)) if not draw_bubble else int(rng.integers(32, 64))
-    stroke_sz = 0 if draw_bubble else int(rng.choice([4, 5, 6, 7, 8, 9], p=[0.16, 0.24, 0.24, 0.16, 0.12, 0.08]))
+    font_size = int(rng.integers(56, 118)) if not draw_bubble else int(rng.integers(34, 62))
+    stroke_sz = 0 if draw_bubble else int(rng.choice([4, 5, 6, 7, 8], p=[0.18, 0.26, 0.26, 0.18, 0.12]))
     invert_white_text = (not draw_bubble) and (rng.random() < 0.18)
 
+    multi_col = len(lines) > 1
     params = {
         "lang": "ja",
         "font_path": font_path,
@@ -992,9 +1121,9 @@ def build_dakuten_sample(rng, font_path: str, dakuten_char: str, is_drawable_fn,
         "tight": not draw_bubble,
         "clean_bg": False,
         "hard_manga_bg": (not draw_bubble) and bool(rng.random() < 0.65),
-        "raw_scan_hard": (not draw_bubble) and bool(rng.random() < 0.60),
-        "fg_occlude_prob": 0.22 if not draw_bubble else 0.08,
-        "trunc_prob": 0.08,
+        "raw_scan_hard": (not draw_bubble) and bool(rng.random() < 0.58),
+        "fg_occlude_prob": 0.18 if not draw_bubble else 0.08,
+        "trunc_prob": 0.05,
         "no_invert": True,
         "text_color": "white" if invert_white_text else "black",
         "stroke_color": "black" if invert_white_text else "white",
@@ -1007,29 +1136,30 @@ def build_dakuten_sample(rng, font_path: str, dakuten_char: str, is_drawable_fn,
     }
     if use_irregular:
         params.update({
-            "line_height": float(rng.uniform(0.10, 0.32)),
-            "letter_spacing": float(rng.uniform(-0.22, 0.04)),
-            "line_scale_min": 0.82,
-            "line_scale_max": 1.30,
-            "line_shift": 0.50,
-            "char_jitter_prob": 0.85,
-            "char_scale_min": 0.68,
-            "char_scale_max": 1.45,
-            "wobble": float(rng.uniform(0.06, 0.18)),
-            "rotate": float(rng.uniform(2.0, 11.0)),
+            "line_height": float(rng.uniform(0.32, 0.52) if multi_col else rng.uniform(0.18, 0.36)),
+            "letter_spacing": float(rng.uniform(-0.14, 0.04)),
+            "line_scale_min": 0.88,
+            "line_scale_max": 1.18,
+            "line_shift": 0.35,
+            "char_jitter_prob": 0.80,
+            "char_scale_min": 0.72,
+            "char_scale_max": 1.32,
+            "wobble": float(rng.uniform(0.04, 0.13)),
+            "rotate": float(rng.uniform(2.0, 9.0)),
         })
     elif use_sfx:
         params.update({
-            "letter_spacing": float(rng.uniform(-0.18, 0.06)),
-            "sfx_curve": str(rng.choice(["straight", "arc", "diagonal", "wave"], p=[0.42, 0.26, 0.18, 0.14])),
-            "sfx_curve_amp": float(rng.uniform(0.04, 0.20)),
-            "sfx_rotate": float(rng.uniform(2.0, 12.0)),
-            "sfx_block_rotate": float(rng.uniform(-18.0, 18.0)) if rng.random() < 0.42 else 0.0,
-            "sfx_speedlines": bool(rng.random() < 0.20),
-            "sfx_burst": bool(rng.random() < 0.08),
+            "line_height": float(rng.uniform(0.30, 0.48) if multi_col else rng.uniform(0.20, 0.38)),
+            "letter_spacing": float(rng.uniform(-0.12, 0.06)),
+            "sfx_curve": str(rng.choice(["straight", "arc", "diagonal", "wave"], p=[0.44, 0.26, 0.18, 0.12])),
+            "sfx_curve_amp": float(rng.uniform(0.04, 0.18)),
+            "sfx_rotate": float(rng.uniform(2.0, 10.0)),
+            "sfx_block_rotate": float(rng.uniform(-16.0, 16.0)) if rng.random() < 0.40 else 0.0,
+            "sfx_speedlines": bool(rng.random() < 0.18),
+            "sfx_burst": bool(rng.random() < 0.06),
             "sfx_double_outline": bool(rng.random() < 0.22),
         })
-    return clean_lines, params
+    return lines, params
 
 
 _WORKER_STATE: dict = {}
@@ -1065,12 +1195,12 @@ def _generate_one(task: tuple[int, str]) -> dict | None:
     normalizer = _WORKER_STATE["normalizer"]
     rng = _WORKER_STATE["rng"]
 
-    for _ in range(16):
+    for _ in range(24):
         try:
             if kind == "clean_paragraph":
                 f_pool = cfg["clean_fonts"] if rng.random() < 0.85 else cfg["all_fonts"]
                 font_path = f_pool[int(rng.integers(0, len(f_pool)))]
-                lines, params = build_clean_paragraph(rng, cfg["sentences"], font_path, is_drawable)
+                lines, params = build_clean_paragraph(rng, cfg["blocks"], font_path, is_drawable)
                 source = "edgecase_clean_paragraph"
             else:
                 f_pool = cfg["expressive_fonts"] if rng.random() < 0.72 else cfg["all_fonts"]
@@ -1208,7 +1338,7 @@ def run_edgecase_pipeline(
         if dakuten_char == "゛" and apply_repo_normalize:
             apply_repo_normalize = False
 
-    join_str = detect_line_join(repo_dir, "ja", line_join)
+    join_str = detect_line_join(repo_dir, "ja", line_join, bg_dir=resolved_bg_dir)
     print(
         f"Edge-case pipeline: mode={mode}, paragraph_ratio={p_ratio:.2f}, "
         f"dakuten_char={resolved_dakuten!r} (U+{ord(resolved_dakuten):04X}), "
@@ -1216,19 +1346,19 @@ def run_edgecase_pipeline(
         f"n_images={n_images:,}, workers={workers}"
     )
 
-    sentences, real_dakuten = load_ja_corpora(
+    blocks, real_dakuten = load_ja_corpora(
         cache_lines_dir, lines_path=lines_path, commit_fn=commit_fn
     )
     all_fonts, clean_fonts, expr_fonts = categorize_ja_fonts(resolved_fonts_root)
     print(
-        f"Fonts ready: total={len(all_fonts)}, clean_paragraph={len(clean_fonts)}, "
+        f"Fonts ready (full-JP filtered): full_jp={len(all_fonts)}, clean_paragraph={len(clean_fonts)}, "
         f"expressive_dakuten={len(expr_fonts)}"
     )
 
     worker_cfg = {
         "repo_dir": str(repo_dir),
         "bg_dir": str(resolved_bg_dir),
-        "sentences": sentences,
+        "blocks": blocks,
         "real_dakuten": real_dakuten,
         "all_fonts": all_fonts,
         "clean_fonts": clean_fonts,
@@ -1259,7 +1389,7 @@ def run_edgecase_pipeline(
             rec = _generate_one((i, kind))
             if rec is not None:
                 prev_recs.append(rec)
-                print(f"  [preview {i}] {rec['source']}: {rec['transcription'][:55]!r}")
+                print(f"  [preview {i}] {rec['source']}: {rec['transcription'][:60]!r}")
         preview_png = out_path / f"preview-{run_id}.png"
         preview_bytes = _make_preview_png(prev_recs, preview_png)
         if preview_bytes is not None:
