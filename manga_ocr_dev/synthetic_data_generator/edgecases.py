@@ -580,6 +580,11 @@ def _clean_jp_line(raw: str) -> str:
     s = re.sub(r"\.{2,}|。{2,}", "…", s)
     s = re.sub(r"[~～]{2,}", "〜", s)
     s = s.replace("~", "〜")
+    s = re.sub(
+        r"(?<=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\u3000-\u303f])\s+|\s+(?=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\u3000-\u303f])",
+        "",
+        s,
+    )  # _RE_CJK_SPACE_EC
     s = _balance_brackets(s).strip()
     # Strip outer quotes if the entire line is wrapped in them
     if len(s) >= 4 and s[0] in ("「", "『") and s[-1] == _RE_OPEN_TO_CLOSE[s[0]]:
@@ -1026,6 +1031,8 @@ def build_dakuten_sample(
         lines = [re.sub(r"[゛\u3099ﾞ]", d, raw)]
     else:
         raise RuntimeError("No corpus lines available for dakuten synthesis.")
+
+    lines = [ln.rstrip("、,") or ln for ln in lines]
 
     # Keep vertical columns punchy (never ultra-skinny 15-char needles!)
     max_col_clusters = max(len(split_graphemes_with_voicing(ln)) for ln in lines)
