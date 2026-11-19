@@ -27,6 +27,19 @@ import pandas as pd
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 from manga_ocr_dev.env import ASSETS_PATH, BACKGROUND_ANIMETEXT_DIR, BACKGROUND_DIR
+from manga_ocr_dev.synthetic_data_generator.edgecases import (
+    CLEAN_BG_MIN_EFFECTIVE_FONT,
+    NATIVE_CLEAN_BG_PROB,
+    NATIVE_HARD_MANGA_BG_PROB,
+    NATIVE_RAW_SCAN_PROB,
+    degrade_clean_page_bgr,
+    degrade_raw_manga_crop_bgr,
+    draw_attached_voicing_char,
+    is_attached_voicing_cluster,
+    make_hard_manga_background,
+    render_clean_background,
+    split_graphemes_with_voicing,
+)
 from manga_ocr_dev.synthetic_data_generator.utils import (
     MissingGlyphError,
     get_background_df,
@@ -159,7 +172,7 @@ def _get_real_kana_bank(root=None, cfg=None):
         return bank
 
 
-IRREGULAR_PROB = 0.12
+IRREGULAR_PROB = 0.18
 LINE_SCALE_RANGE = (0.6, 1.55)
 LINE_SHIFT_EM = 1.5
 CHAR_SCALE_RANGE = (0.65, 1.6)
@@ -170,7 +183,7 @@ SMALL_KANA = frozenset("ぁぃぅぇぉっゃゅょゎァィゥェォッャュ�
 SMALL_KANA_SCALE = (0.55, 0.8)
 MIN_CHAR_SIZE = 8
 
-SLANT_PROB = 0.08
+SLANT_PROB = 0.12
 SLANT_MILD_RANGE = (8.0, 15.0)
 SLANT_STRONG_RANGE = (20.0, 38.0)
 SLANT_STRONG_PROB = 0.20
@@ -198,7 +211,7 @@ SFX_DOUBLE_OUTLINE_PROB = 0.3
 SFX_CROP_MARGIN_FRAC = (0.02, 0.06)
 SFX_CROP_MARGIN_MIN = 2
 SFX_INK_ALPHA_THRESHOLD = 8
-TRUNC_PROB = 0.03
+TRUNC_PROB = 0.06
 TRUNC_FRAC_RANGE = (0.10, 0.30)
 TRUNC_INK_BITE_EM = 0.10
 SHADOW_GLOW_GAIN = 2.0
@@ -247,7 +260,7 @@ BG_NOISE_PROB = 0.35
 BG_HATCH_PROB = 0.22
 BG_COLOR_ART_PROB = 0.65
 BUBBLE_FILL_MODES = ("white", "gray", "tint", "tone", "dark")
-BUBBLE_FILL_P = (0.78, 0.10, 0.05, 0.03, 0.04)
+BUBBLE_FILL_P = (0.66, 0.12, 0.06, 0.08, 0.08)
 
 HOLLOW_PROB = 0.06
 GRADIENT_FILL_PROB = 0.12
@@ -255,7 +268,7 @@ STRIPE_FILL_PROB = 0.10
 EXTRUDE_PROB = 0.15
 DISTRESS_PROB = 0.10
 FAINT_PROB = 0.04
-FG_OCCLUDE_PROB = 0.12
+FG_OCCLUDE_PROB = 0.18
 DEGRADE_JPEG_PROB = 0.5
 DEGRADE_SCALE_PROB = 0.3
 DEGRADE_BLUR_PROB = 0.25
@@ -595,9 +608,15 @@ def _assert_no_tofu(parsed, font_path):
     for tokens in parsed:
         for tok in tokens:
             text = "".join(_strip_tags(part) for part in tok[1:] if isinstance(part, str))
-            for ch in text:
-                if not is_drawable(font_path, ch):
-                    raise MissingGlyphError(f"{font_path!r} cannot draw {ch!r} (U+{ord(ch):04X})")
+            for cluster in _graphemes(text):
+                if is_attached_voicing_cluster(cluster):
+                    for ch in cluster[:-1]:
+                        if not is_drawable(font_path, ch):
+                            raise MissingGlyphError(f"{font_path!r} cannot draw {ch!r} (U+{ord(ch):04X})")
+                    continue
+                for ch in cluster:
+                    if not is_drawable(font_path, ch):
+                        raise MissingGlyphError(f"{font_path!r} cannot draw {ch!r} (U+{ord(ch):04X})")
 
 
 def _strip_tags(s):
@@ -605,19 +624,8 @@ def _strip_tags(s):
 
 
 def _graphemes(text):
-    """Split text into base characters with their combining marks attached.
-
-    Japanese fonts draw a lone combining mark (e.g. U+3099 dakuten) inside a
-    dotted-circle placeholder, so ``"ぃ" + "\\u3099"`` must be laid out and
-    rasterized as one glyph cluster instead of two independent cells.
-    """
-    clusters = []
-    for ch in text:
-        if clusters and unicodedata.category(ch).startswith("M"):
-            clusters[-1] += ch
-        else:
-            clusters.append(ch)
-    return clusters
+    """Split text into base characters with combining & manga voicing marks attached."""
+    return split_graphemes_with_voicing(text)
 
 
 def _parse_inline(s):
@@ -944,30 +952,71 @@ class Renderer:
         else:
             draw_bubble = bool(np.random.random() < 0.80)
 
-        pre_params["draw_bubble"] = draw_bubble
-        if not draw_bubble:
+        explicit_clean = pre_params.get("clean_bg", None)
+        if explicit_clean is not None:
+            clean_bg = bool(explicit_clean)
+        elif (
+            (override_css_params or {}).get("draw_bubble", None) is None
+            and not pre_params.get("sfx")
+            and np.random.rand() < NATIVE_CLEAN_BG_PROB
+        ):
+            clean_bg = True
+        else:
+            clean_bg = False
+
+        hard_manga_bg = pre_params.get("hard_manga_bg", None)
+        if hard_manga_bg is None:
+            hard_manga_bg = (not clean_bg) and (not draw_bubble) and bool(np.random.rand() < NATIVE_HARD_MANGA_BG_PROB)
+        else:
+            hard_manga_bg = bool(hard_manga_bg)
+
+        if clean_bg:
+            draw_bubble = False
+            pre_params["draw_bubble"] = False
             pre_params["faint"] = False
-            if int(pre_params.get("stroke_size") or 0) < 3:
-                pre_params["stroke_size"] = 3
-                if not pre_params.get("stroke_color"):
-                    tc = str(pre_params.get("text_color", "black")).strip().lower()
-                    pre_params["stroke_color"] = "black" if tc == "white" else "white"
+            pre_params.setdefault("stroke_size", 0)
+            pre_params.setdefault("shadow_size", 0)
+            pre_params.setdefault("clean_box_border", bool(np.random.rand() < 0.16))
+            pre_params.setdefault("clean_bleedthrough", bool(np.random.rand() < 0.18))
+        else:
+            pre_params["draw_bubble"] = draw_bubble
+            if not draw_bubble:
+                pre_params["faint"] = False
+                if int(pre_params.get("stroke_size") or 0) < 3:
+                    pre_params["stroke_size"] = 3
+                    if not pre_params.get("stroke_color"):
+                        tc = str(pre_params.get("text_color", "black")).strip().lower()
+                        pre_params["stroke_color"] = "black" if tc == "white" else "white"
 
         img, params = self.render_text(lines, pre_params)
 
         tight = bool(params.get("tight", bool(params.get("sfx"))))
         img, ink_box, quality = self.render_background(
-            img, draw_bubble=draw_bubble, tight=tight, return_ink_box=True, return_info=True
+            img,
+            draw_bubble=draw_bubble,
+            tight=tight,
+            return_ink_box=True,
+            return_info=True,
+            clean_bg=clean_bg,
+            clean_bg_color=params.get("clean_bg_color"),
+            clean_margin=params.get("clean_margin"),
+            clean_box_border=bool(params.get("clean_box_border", False)),
+            clean_bleedthrough=bool(params.get("clean_bleedthrough", False)),
+            hard_manga_bg=hard_manga_bg,
+            no_invert=bool(params.get("no_invert", False)),
         )
-        if not draw_bubble and np.random.rand() < TRUNC_PROB and min(img.shape[:2]) > 24:
+        trunc_p = float(params.get("trunc_prob", TRUNC_PROB))
+        if not clean_bg and not draw_bubble and np.random.rand() < trunc_p and min(img.shape[:2]) > 24:
             bite = TRUNC_INK_BITE_EM * float(params.get("font_size", 48))
             img = _truncate_bgr(img, ink_box=ink_box, bite_px=bite)
-        if np.random.rand() < FG_OCCLUDE_PROB:
-            img = _draw_foreground_occluders_bgr(img, density=float(np.random.uniform(0.7, 1.4)))
+        occlude_p = float(params.get("fg_occlude_prob", 0.0 if clean_bg else FG_OCCLUDE_PROB))
+        if np.random.rand() < occlude_p:
+            img = _draw_foreground_occluders_bgr(img, density=float(np.random.uniform(0.7, 1.5)))
         pre_scale_h, pre_scale_w = img.shape[:2]
-        if max(img.shape[:2]) > self.max_size:
-            img = A.LongestMaxSize(self.max_size)(image=img)["image"]
-        final_scale = min(1.0, float(self.max_size) / max(1, pre_scale_h, pre_scale_w))
+        max_sz = int(params.get("max_size") or self.max_size)
+        if max(img.shape[:2]) > max_sz:
+            img = A.LongestMaxSize(max_sz)(image=img)["image"]
+        final_scale = min(1.0, float(max_sz) / max(1, pre_scale_h, pre_scale_w))
         h, w = img.shape[:2]
         issues = []
         if min(h, w) < MIN_OUTPUT_SIDE:
@@ -976,23 +1025,39 @@ class Renderer:
         if aspect > MAX_OUTPUT_ASPECT:
             issues.append(f"extreme aspect ratio ({aspect:.1f}:1)")
         effective_font = float(params.get("font_size", 48)) * final_scale
-        if effective_font < MIN_EFFECTIVE_FONT:
-            issues.append(f"text too small after downscale ({effective_font:.1f}px)")
+        min_eff_font = float(
+            params.get(
+                "min_effective_font",
+                CLEAN_BG_MIN_EFFECTIVE_FONT if (clean_bg or len(lines) >= 4) else MIN_EFFECTIVE_FONT,
+            )
+        )
+        if effective_font < min_eff_font:
+            issues.append(f"text too small after downscale ({effective_font:.1f}px < {min_eff_font:.1f}px)")
         visible_frac = float(quality.get("visible_frac", 1.0))
         if visible_frac < MIN_VISIBLE_TEXT_FRAC:
             issues.append(f"text has too little background contrast ({visible_frac:.2f})")
-        if aspect > STRIP_ASPECT and (effective_font < 24.0 or visible_frac < 0.70):
+        if not clean_bg and aspect > STRIP_ASPECT and (effective_font < 24.0 or visible_frac < 0.70):
             issues.append(f"thin strip without clear text ({aspect:.1f}:1, {effective_font:.1f}px, {visible_frac:.2f})")
         if issues:
             raise DegenerateSampleError("degenerate synthetic crop: " + ", ".join(issues))
         is_color = _params_are_color(params)
-        img = _scan_model_bgr(img, allow_spread=draw_bubble)
-        img = _degrade_bgr(
-            img,
-            is_color,
-            allow_blur=(effective_font >= 28.0),
-            allow_scale=(effective_font >= 32.0),
-        )
+        if clean_bg:
+            img = degrade_clean_page_bgr(img, effective_font=effective_font, scan_model_fn=_scan_model_bgr)
+        else:
+            raw_scan = params.get("raw_scan_hard", None)
+            use_raw_scan = bool(raw_scan) if raw_scan is not None else (effective_font >= 24.0 and np.random.rand() < NATIVE_RAW_SCAN_PROB)
+            if use_raw_scan:
+                img = degrade_raw_manga_crop_bgr(
+                    img, is_color=is_color, max_output_aspect=MAX_OUTPUT_ASPECT, scan_model_fn=_scan_model_bgr
+                )
+            else:
+                img = _scan_model_bgr(img, allow_spread=draw_bubble)
+                img = _degrade_bgr(
+                    img,
+                    is_color,
+                    allow_blur=(effective_font >= 28.0),
+                    allow_scale=(effective_font >= 32.0),
+                )
         if is_color:
             return img, params
         if img.ndim == 3:
@@ -1040,6 +1105,15 @@ class Renderer:
         parsed = [_parse_line(line) for line in lines]
         if not skip_tofu:
             _assert_no_tofu(parsed, font_path)
+        if any(
+            is_attached_voicing_cluster(cl)
+            for tokens in parsed
+            for tok in tokens
+            for part in tok[1:]
+            if isinstance(part, str)
+            for cl in _graphemes(_strip_tags(part))
+        ):
+            pad += max(10, math.ceil(font_size * 0.48))
 
         if sfx:
             width, height, ops = self._layout_sfx(
@@ -1100,6 +1174,7 @@ class Renderer:
                 upright=upright,
                 margin=BODY_MARGIN,
                 pad=pad,
+                text_align=str(params.get("text_align", "left")),
             )
 
         base = Image.new("RGBA", (width, height), bg_rgba)
@@ -1121,6 +1196,11 @@ class Renderer:
 
         main_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         _assign_op_colors(ops, params)
+        dakuten_style = str(params.get("dakuten_style", "auto"))
+        for op in ops:
+            if op.get("kind") == "char" and is_attached_voicing_cluster(op.get("ch", "")):
+                op["_voicing_seed"] = int(np.random.randint(0, 2**31 - 1))
+                op["_dakuten_style"] = dakuten_style
         kana_bank = self._attach_real_kana(ops, params, sfx=sfx, irregular=irregular)
         faint_k = float(params.get("faint_alpha", 0.65)) if bool(params.get("faint", False)) else 1.0
         if shadow_size > 0:
@@ -1332,6 +1412,7 @@ class Renderer:
         upright,
         margin,
         pad,
+        text_align="left",
     ):
         pitch_base = round(font_size * (1.0 + line_height))
         ops = []
@@ -1431,7 +1512,13 @@ class Renderer:
                 op_start = len(ops)
                 base_cy = slot_top + (ruby_size + RUBY_GAP if ruby else 0) + font_size / 2
                 ruby_cy = slot_top + ruby_size / 2
-                x = x_left
+                line_w = widths[li] if li < len(widths) else 0
+                if text_align == "center":
+                    x = x_left + (inner_w - line_w) / 2.0
+                elif text_align == "right":
+                    x = x_left + (inner_w - line_w)
+                else:
+                    x = x_left
                 for tok in tokens:
                     if tok[0] == "text":
                         for ch in _graphemes(_strip_tags(tok[1])):
@@ -1976,6 +2063,31 @@ class Renderer:
             else:
                 op_fill = op.get("shadow", fill)
                 op_edge = op_fill
+            if op.get("kind") == "char" and is_attached_voicing_cluster(op.get("ch", "")):
+                draw_attached_voicing_char(
+                    layer,
+                    op["ch"],
+                    op["cx"],
+                    op["cy"],
+                    font=op["font"],
+                    cell=op.get("cell") or font_size,
+                    fill=op_fill,
+                    stroke_width=stroke_width,
+                    stroke_fill=op_edge,
+                    get_font_fn=_get_font,
+                    is_drawable_fn=is_drawable,
+                    safe_draw_fn=_safe_draw_text,
+                    angle=angle,
+                    persp=persp,
+                    rotate_mixed=bool(op.get("rotate", False)),
+                    ttb=bool(op.get("ttb", False)),
+                    lang=ttb_lang,
+                    aspect=op.get("aspect"),
+                    pcoef=op.get("pcoef"),
+                    voicing_seed=op.get("_voicing_seed"),
+                    dakuten_style=op.get("_dakuten_style", "auto"),
+                )
+                continue
             if kana_bank is not None and op.get("kana"):
                 from manga_ocr_dev.real_kana.bank import draw_bank_op
 
@@ -2393,7 +2505,40 @@ class Renderer:
         visible = np.abs(ink_lum - bg_lum) >= MIN_TEXT_CONTRAST
         return {"visible_frac": float(visible[ink].mean()), "ink_frac": ink_frac}
 
-    def render_background(self, img, draw_bubble=None, tight=False, return_ink_box=False, return_info=False):
+    def render_background(
+        self,
+        img,
+        draw_bubble=None,
+        tight=False,
+        return_ink_box=False,
+        return_info=False,
+        clean_bg=False,
+        clean_bg_color=None,
+        clean_margin=None,
+        clean_box_border=False,
+        clean_bleedthrough=False,
+        hard_manga_bg=False,
+        no_invert=False,
+    ):
+        if clean_bg:
+            out, ink_box, quality = render_clean_background(
+                self,
+                img,
+                crop_by_alpha_fn=crop_by_alpha,
+                normalize_color_fn=_normalize_color,
+                blend_fn=blend,
+                clean_bg_color=clean_bg_color,
+                clean_margin=clean_margin,
+                clean_box_border=clean_box_border,
+                clean_bleedthrough=clean_bleedthrough,
+            )
+            if return_ink_box and return_info:
+                return out, ink_box, quality
+            if return_ink_box:
+                return out, ink_box
+            if return_info:
+                return out, quality
+            return out
         if draw_bubble is None:
             draw_bubble = np.random.random() < 0.80
 
@@ -2438,12 +2583,14 @@ class Renderer:
                 inverted = fill_mode == "dark" and invert_for_dark
             if inverted:
                 img[:, :, :3] = 255 - img[:, :, :3]
-        elif not chromatic_ink and np.random.rand() < 0.5:
+        elif not no_invert and not chromatic_ink and np.random.rand() < 0.5:
             img[:, :, :3] = 255 - img[:, :, :3]
 
         background = self._load_background(img.shape[0], img.shape[1])
         if draw_bubble:
             background = self._decorate_background(self._adjust_background(background, 128.0))
+        elif hard_manga_bg:
+            background = make_hard_manga_background(background, screentone_fn=_screentone, hatch_fn=_hatch_overlay)
         else:
             background = self._make_background(background, img)
 
@@ -2539,6 +2686,15 @@ class Renderer:
 
 
 def _advance(font, ch, letter_spacing_px):
+    if is_attached_voicing_cluster(ch):
+        base = ch[:-1]
+        try:
+            w = font.getlength(base)
+        except (OSError, ValueError):
+            w = 0
+        if not w:
+            w = font.size
+        return w + round(font.size * 0.28) + letter_spacing_px
     try:
         w = font.getlength(ch)
     except (OSError, ValueError):

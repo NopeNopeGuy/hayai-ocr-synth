@@ -395,6 +395,11 @@ def run_notebook_pipeline(
     update_card: bool = True,
     dry_run_card: bool = False,
     perf_patches: bool = True,
+    edgecase_mode: str = "",
+    edgecase_paragraph_ratio: float = 0.50,
+    dakuten_char: str = "auto",
+    line_join: str = "auto",
+    apply_repo_normalize: bool = True,
 ) -> dict:
     import pyarrow.parquet as pq
     from huggingface_hub import HfApi, login
@@ -407,10 +412,18 @@ def run_notebook_pipeline(
 
     cache_vol.reload()
 
+    edgecase_active = bool(edgecase_mode and edgecase_mode.strip().lower() not in ("off", "none", "false"))
+    if edgecase_active and language != "ja":
+        print(f"edgecase_mode={edgecase_mode!r} targets Japanese edge cases; switching language {language!r} -> 'ja'.")
+        language = "ja"
+
     if split == "auto":
         default_splits = {"zh": "chinese", "ko": "korean", "en": "english", "ja": "japanese"}
         split = default_splits.get(language, "multilingual")
-        if crop_preset == "sfx" or lines_mode == "sfx":
+        if edgecase_active:
+            suffix = edgecase_mode.strip().lower()
+            split = f"{split}_edgecases" if suffix in ("all", "both", "edgecases") else f"{split}_{suffix}"
+        elif crop_preset == "sfx" or lines_mode == "sfx":
             split = f"{split}_sfx"
         elif crop_preset == "handwritten":
             split = f"{split}_handwritten"
@@ -487,6 +500,47 @@ def run_notebook_pipeline(
             print(f"override_previous (run): removed {removed} local shard(s) for run_id={run_id!r}.")
         cache_vol.commit()
         resume = False
+
+    if edgecase_active:
+        try:
+            from manga_ocr_dev.synthetic_data_generator.edgecases import run_edgecase_pipeline
+        except ImportError as exc:
+            raise RuntimeError(
+                "edgecases.py not found in cloned repo. Push your commit to GitHub first so Modal pulls it."
+            ) from exc
+        return run_edgecase_pipeline(
+            edgecase_mode=edgecase_mode,
+            edgecase_paragraph_ratio=edgecase_paragraph_ratio,
+            dakuten_char=dakuten_char,
+            line_join=line_join,
+            apply_repo_normalize=apply_repo_normalize,
+            repo_dir=repo_dir,
+            resolved_fonts_root=resolved_fonts_root,
+            resolved_bg_dir=resolved_bg_dir,
+            cache_lines_dir=CACHE_MOUNT / "lines",
+            out_path=out_path,
+            hf_dataset=hf_dataset,
+            hf_token=hf_token,
+            split=split,
+            run_id=run_id,
+            n_images=n_images,
+            rows_per_shard=rows_per_shard,
+            workers=workers,
+            seed=seed,
+            jpeg_quality=jpeg_quality,
+            lines_path=lines_path,
+            resume=resume,
+            override_previous=override_previous,
+            override_scope=override_scope,
+            preview_n=preview_n,
+            skip_preview=skip_preview,
+            preview_only=preview_only,
+            push_to_hub=push_to_hub,
+            update_card=update_card,
+            dry_run_card=dry_run_card,
+            commit_fn=cache_vol.commit,
+            run_script_fn=_run_script,
+        )
 
     script = repo_dir / "tools" / "append_hayai_synth.py"
 
@@ -733,6 +787,11 @@ def main(
     preview_only: bool = False,
     local_preview_out: str = "",
     perf_patches: bool = True,
+    edgecase_mode: str = "",
+    edgecase_paragraph_ratio: float = 0.50,
+    dakuten_char: str = "auto",
+    line_join: str = "auto",
+    apply_repo_normalize: bool = True,
 ):
     result = run_notebook_pipeline.remote(
         language=language,
@@ -759,6 +818,11 @@ def main(
         skip_preview=skip_preview,
         preview_only=preview_only,
         perf_patches=perf_patches,
+        edgecase_mode=edgecase_mode,
+        edgecase_paragraph_ratio=edgecase_paragraph_ratio,
+        dakuten_char=dakuten_char,
+        line_join=line_join,
+        apply_repo_normalize=apply_repo_normalize,
     )
     preview_bytes = result.pop("preview_bytes", None)
     preview_name = result.pop("preview_filename", None)
